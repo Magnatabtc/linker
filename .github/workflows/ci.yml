@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+      - run: go test ./...
+      - run: go vet ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact: linker_linux_amd64.tar.gz
+            binary: linker
+          - goos: linux
+            goarch: arm64
+            artifact: linker_linux_arm64.tar.gz
+            binary: linker
+          - goos: darwin
+            goarch: amd64
+            artifact: linker_darwin_amd64.tar.gz
+            binary: linker
+          - goos: darwin
+            goarch: arm64
+            artifact: linker_darwin_arm64.tar.gz
+            binary: linker
+          - goos: windows
+            goarch: amd64
+            artifact: linker_windows_amd64.zip
+            binary: linker.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+      - name: Build binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          export CGO_ENABLED=0
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.binary }}" ./cmd/linker
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            (cd dist && zip -q "../release/${{ matrix.artifact }}" "${{ matrix.binary }}")
+          else
+            tar -C dist -czf "release/${{ matrix.artifact }}" "${{ matrix.binary }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/${{ matrix.artifact }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f -maxdepth 2 -exec cp {} release/ \;
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          for file in *; do
+            sha256sum "$file"
+          done > checksums.txt
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*
