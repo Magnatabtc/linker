@@ -31,7 +31,7 @@ Linker is a local AI provider bridge for Claude Code. It runs as a local daemon,
 Use the global installer if you want the fastest path to a working shell command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/linker-cli/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
+curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
 ```
 
 If you already cloned the repo, run the local script instead:
@@ -124,7 +124,7 @@ linker version
 Recommended entrypoint for non-technical users:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/linker-cli/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
+curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
 ```
 
 This is the easiest path, but it trusts whatever is currently on `main` when the script is fetched. Use it only if you accept that moving-branch tradeoff.
