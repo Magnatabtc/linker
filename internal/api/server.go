@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -32,6 +31,8 @@ type Server struct {
 	logger    *logging.Logger
 	mu        sync.Mutex
 }
+
+const maxRequestBodyBytes int64 = 8 << 20
 
 func New(cfg config.Config, repo *state.Repository, store *config.Store, providers *provider.Registry, catalog *catalog.Service, logger *logging.Logger) *Server {
 	return &Server{cfg: cfg, repo: repo, store: store, providers: providers, catalog: catalog, logger: logger}
@@ -105,9 +106,9 @@ func (s *Server) handleAnthropic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing local auth token", http.StatusUnauthorized)
 		return
 	}
-	req, err := compat.ParseAnthropicRequest(r.Body)
+	req, err := compat.ParseAnthropicRequest(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeRequestParseError(w, err)
 		return
 	}
 	if req.Stream {
@@ -145,9 +146,9 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing local auth token", http.StatusUnauthorized)
 		return
 	}
-	req, err := compat.ParseOpenAIRequest(r.Body)
+	req, err := compat.ParseOpenAIRequest(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeRequestParseError(w, err)
 		return
 	}
 	if req.Stream {
@@ -188,13 +189,7 @@ func (s *Server) invoke(ctx context.Context, req compat.NormalizedRequest) (comp
 	}
 	var lastErr error
 	for _, target := range targets {
-		authPath := target.AuthFile
-		if !filepath.IsAbs(authPath) {
-			authPath = filepath.Join(s.repo.Layout().Root, authPath)
-			if !strings.Contains(authPath, s.repo.Layout().AuthDir) {
-				authPath = filepath.Join(s.repo.Layout().AuthDir, filepath.Base(target.AuthFile))
-			}
-		}
+		authPath := s.repo.ResolveAuthPath(target.AuthFile)
 		auth, err := s.repo.LoadAuth(authPath)
 		if err != nil {
 			lastErr = err
@@ -344,13 +339,7 @@ func (s *Server) resolveTargets(model string) ([]router.Target, error) {
 }
 
 func (s *Server) loadTargetDriver(target router.Target) (state.AccountAuth, any, error) {
-	authPath := target.AuthFile
-	if !filepath.IsAbs(authPath) {
-		authPath = filepath.Join(s.repo.Layout().Root, authPath)
-		if !strings.Contains(authPath, s.repo.Layout().AuthDir) {
-			authPath = filepath.Join(s.repo.Layout().AuthDir, filepath.Base(target.AuthFile))
-		}
-	}
+	authPath := s.repo.ResolveAuthPath(target.AuthFile)
 	auth, err := s.repo.LoadAuth(authPath)
 	if err != nil {
 		return state.AccountAuth{}, nil, err
@@ -381,6 +370,15 @@ func writeProxyError(w http.ResponseWriter, err error) {
 		return
 	}
 	http.Error(w, err.Error(), http.StatusBadGateway)
+}
+
+func writeRequestParseError(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }
 
 func hasLocalAuth(r *http.Request) bool {

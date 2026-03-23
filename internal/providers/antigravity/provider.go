@@ -25,17 +25,33 @@ func New() *Driver {
 	return &Driver{}
 }
 
+var antigravityModelAliases = map[string]string{
+	"gemini-3.1-pro":               "gemini-3.1-pro",
+	"Gemini 3.1 Pro (High)":        "gemini-3.1-pro",
+	"gemini-3-pro":                 "gemini-3-pro",
+	"Gemini 3.1 Pro (Low)":         "gemini-3-pro",
+	"gemini-3-flash":               "gemini-3-flash",
+	"Gemini 3 Flash":               "gemini-3-flash",
+	"claude-sonnet-4-6":            "claude-sonnet-4-6",
+	"Claude Sonnet 4.6 (Thinking)": "claude-sonnet-4-6",
+	"claude-opus-4-6":              "claude-opus-4-6",
+	"Claude Opus 4.6 (Thinking)":   "claude-opus-4-6",
+	"gpt-oss-120b":                 "gpt-oss-120b",
+	"GPT-OSS 120B (Medium)":        "gpt-oss-120b",
+}
+
 func (d *Driver) Info() providerkit.Info {
 	return providerkit.Info{
 		ID:          "antigravity",
 		DisplayName: "Antigravity",
 		AuthKind:    "oauth",
 		Models: []string{
-			"gemini-3-pro",
-			"gemini-3.1-pro",
-			"gemini-3-flash",
-			"claude-sonnet-4-6",
-			"claude-opus-4-6",
+			"Gemini 3.1 Pro (High)",
+			"Gemini 3.1 Pro (Low)",
+			"Gemini 3 Flash",
+			"Claude Sonnet 4.6 (Thinking)",
+			"Claude Opus 4.6 (Thinking)",
+			"GPT-OSS 120B (Medium)",
 		},
 	}
 }
@@ -58,6 +74,17 @@ func (d *Driver) DiscoverModels(_ context.Context, auth state.AccountAuth) ([]pr
 		})
 	}
 	return models, nil
+}
+
+func antigravityModelID(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return ""
+	}
+	if canonical, ok := antigravityModelAliases[trimmed]; ok {
+		return canonical
+	}
+	return trimmed
 }
 
 func (d *Driver) Invoke(ctx context.Context, auth state.AccountAuth, req compat.NormalizedRequest) (compat.NormalizedResponse, state.AccountAuth, error) {
@@ -233,7 +260,7 @@ func buildRequest(auth state.AccountAuth, req compat.NormalizedRequest) (map[str
 
 	return map[string]any{
 		"project":   auth.ProjectID,
-		"model":     req.Model,
+		"model":     antigravityModelID(req.Model),
 		"request":   request,
 		"userAgent": buildUserAgent(),
 		"requestId": fmt.Sprintf("agent-%d", time.Now().UnixNano()),

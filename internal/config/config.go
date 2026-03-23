@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"linker/internal/modelnorm"
 )
 
 const SchemaVersion = 1
@@ -95,6 +97,7 @@ func (s *Store) Load(defaultConfig Config) (Config, error) {
 
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
+		defaultConfig.ModelMapping = normalizeModelMapping(defaultConfig.ModelMapping)
 		return defaultConfig, nil
 	}
 	if err != nil {
@@ -124,6 +127,7 @@ func (s *Store) Load(defaultConfig Config) (Config, error) {
 	if cfg.MultiAccountStrategy == "" {
 		cfg.MultiAccountStrategy = "sticky-fallback"
 	}
+	cfg.ModelMapping = normalizeModelMapping(cfg.ModelMapping)
 	return cfg, nil
 }
 
@@ -148,12 +152,13 @@ func (s *Store) Save(cfg Config) error {
 	if cfg.MultiAccountStrategy == "" {
 		cfg.MultiAccountStrategy = "sticky-fallback"
 	}
+	cfg.ModelMapping = normalizeModelMapping(cfg.ModelMapping)
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
 	tmp := s.path + ".tmp"
@@ -220,6 +225,20 @@ func normalizeProviders(providers map[string]ProviderConfig) map[string]Provider
 		providers[id] = providerCfg
 	}
 	return providers
+}
+
+func normalizeModelMapping(mapping ModelMapping) ModelMapping {
+	mapping.Default = normalizeModelTarget(mapping.Default)
+	mapping.Opus = normalizeModelTarget(mapping.Opus)
+	mapping.Sonnet = normalizeModelTarget(mapping.Sonnet)
+	mapping.Haiku = normalizeModelTarget(mapping.Haiku)
+	return mapping
+}
+
+func normalizeModelTarget(target ModelTarget) ModelTarget {
+	target.Provider = strings.TrimSpace(target.Provider)
+	target.Model = modelnorm.Normalize(target.Provider, target.Model)
+	return target
 }
 
 func defaultProviderType(id string) string {

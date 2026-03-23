@@ -2,7 +2,6 @@ package catalog
 
 import (
 	"context"
-	"path/filepath"
 	"time"
 
 	"linker/internal/config"
@@ -29,7 +28,7 @@ func (s *Service) Refresh(ctx context.Context, cfg config.Config) (state.ModelRe
 			continue
 		}
 		if providerCfg.UsesProviderAuth() {
-			auth, err := s.repo.LoadAuth(s.resolveAuthPath(providerCfg.AuthFile))
+			auth, err := s.repo.LoadAuth(s.repo.ResolveAuthPath(providerCfg.AuthFile))
 			if err != nil {
 				continue
 			}
@@ -57,7 +56,7 @@ func (s *Service) Refresh(ctx context.Context, cfg config.Config) (state.ModelRe
 			continue
 		}
 		for _, account := range providerCfg.Accounts {
-			auth, err := s.repo.LoadAuth(s.resolveAuthPath(account.AuthFile))
+			auth, err := s.repo.LoadAuth(s.repo.ResolveAuthPath(account.AuthFile))
 			if err != nil {
 				continue
 			}
@@ -88,14 +87,4 @@ func (s *Service) Refresh(ctx context.Context, cfg config.Config) (state.ModelRe
 		return state.ModelRegistry{}, err
 	}
 	return registry, nil
-}
-
-func (s *Service) resolveAuthPath(value string) string {
-	if value == "" {
-		return ""
-	}
-	if filepath.IsAbs(value) {
-		return value
-	}
-	return filepath.Join(s.repo.Layout().AuthDir, filepath.Base(value))
 }

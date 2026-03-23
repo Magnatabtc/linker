@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"linker/internal/config"
+	"linker/internal/modelnorm"
 	"linker/internal/provider"
 	"linker/internal/state"
 )
@@ -26,6 +27,7 @@ func Resolve(cfg config.Config, registry state.ModelRegistry, providers *provide
 }
 
 func ResolveCandidates(cfg config.Config, registry state.ModelRegistry, providers *provider.Registry, requested string) ([]Target, error) {
+	requested = modelnorm.Normalize("", requested)
 	if target, ok := resolveSlot(cfg, requested); ok {
 		return resolveAccounts(cfg, target)
 	}
@@ -37,19 +39,21 @@ func ResolveCandidates(cfg config.Config, registry state.ModelRegistry, provider
 		}
 		if providerCfg.UsesProviderAuth() {
 			for _, model := range registry.Entries[providerID] {
-				if strings.EqualFold(model.Name, requested) {
+				canonicalModel := modelnorm.Normalize(providerID, model.Name)
+				if strings.EqualFold(canonicalModel, requested) {
 					targets = append(targets, Target{
 						Provider: providerID,
-						Model:    model.Name,
+						Model:    canonicalModel,
 						AuthFile: providerCfg.AuthFile,
 					})
 				}
 			}
 			for _, model := range providers.BuiltinModels(providerID) {
-				if strings.EqualFold(model.Name, requested) {
+				canonicalModel := modelnorm.Normalize(providerID, model.Name)
+				if strings.EqualFold(canonicalModel, requested) {
 					targets = append(targets, Target{
 						Provider: providerID,
-						Model:    model.Name,
+						Model:    canonicalModel,
 						AuthFile: providerCfg.AuthFile,
 					})
 				}
@@ -59,20 +63,22 @@ func ResolveCandidates(cfg config.Config, registry state.ModelRegistry, provider
 		for _, account := range orderedAccounts(providerCfg) {
 			key := providerID + ":" + account.ID
 			for _, model := range registry.Entries[key] {
-				if strings.EqualFold(model.Name, requested) {
+				canonicalModel := modelnorm.Normalize(providerID, model.Name)
+				if strings.EqualFold(canonicalModel, requested) {
 					targets = append(targets, Target{
 						Provider:  providerID,
-						Model:     model.Name,
+						Model:     canonicalModel,
 						AccountID: account.ID,
 						AuthFile:  account.AuthFile,
 					})
 				}
 			}
 			for _, model := range providers.BuiltinModels(providerID) {
-				if strings.EqualFold(model.Name, requested) {
+				canonicalModel := modelnorm.Normalize(providerID, model.Name)
+				if strings.EqualFold(canonicalModel, requested) {
 					targets = append(targets, Target{
 						Provider:  providerID,
-						Model:     model.Name,
+						Model:     canonicalModel,
 						AccountID: account.ID,
 						AuthFile:  account.AuthFile,
 					})
@@ -87,27 +93,33 @@ func ResolveCandidates(cfg config.Config, registry state.ModelRegistry, provider
 }
 
 func resolveSlot(cfg config.Config, requested string) (config.ModelTarget, bool) {
-	lower := strings.ToLower(requested)
+	lower := strings.ToLower(strings.TrimSpace(requested))
 	switch {
 	case lower == "" && cfg.ModelMapping.Default.Model != "":
-		return cfg.ModelMapping.Default, true
+		return normalizeTarget(cfg.ModelMapping.Default), true
 	case strings.Contains(lower, "claude-opus"):
-		return cfg.ModelMapping.Opus, true
+		return normalizeTarget(cfg.ModelMapping.Opus), true
 	case strings.Contains(lower, "claude-sonnet"):
-		return cfg.ModelMapping.Sonnet, true
+		return normalizeTarget(cfg.ModelMapping.Sonnet), true
 	case strings.Contains(lower, "claude-haiku"):
-		return cfg.ModelMapping.Haiku, true
-	case strings.EqualFold(requested, cfg.ModelMapping.Default.Model):
-		return cfg.ModelMapping.Default, true
-	case strings.EqualFold(requested, cfg.ModelMapping.Opus.Model):
-		return cfg.ModelMapping.Opus, true
-	case strings.EqualFold(requested, cfg.ModelMapping.Sonnet.Model):
-		return cfg.ModelMapping.Sonnet, true
-	case strings.EqualFold(requested, cfg.ModelMapping.Haiku.Model):
-		return cfg.ModelMapping.Haiku, true
+		return normalizeTarget(cfg.ModelMapping.Haiku), true
+	case strings.EqualFold(requested, modelnorm.Normalize(cfg.ModelMapping.Default.Provider, cfg.ModelMapping.Default.Model)):
+		return normalizeTarget(cfg.ModelMapping.Default), true
+	case strings.EqualFold(requested, modelnorm.Normalize(cfg.ModelMapping.Opus.Provider, cfg.ModelMapping.Opus.Model)):
+		return normalizeTarget(cfg.ModelMapping.Opus), true
+	case strings.EqualFold(requested, modelnorm.Normalize(cfg.ModelMapping.Sonnet.Provider, cfg.ModelMapping.Sonnet.Model)):
+		return normalizeTarget(cfg.ModelMapping.Sonnet), true
+	case strings.EqualFold(requested, modelnorm.Normalize(cfg.ModelMapping.Haiku.Provider, cfg.ModelMapping.Haiku.Model)):
+		return normalizeTarget(cfg.ModelMapping.Haiku), true
 	default:
 		return config.ModelTarget{}, false
 	}
+}
+
+func normalizeTarget(target config.ModelTarget) config.ModelTarget {
+	target.Provider = strings.TrimSpace(target.Provider)
+	target.Model = modelnorm.Normalize(target.Provider, target.Model)
+	return target
 }
 
 func resolveAccounts(cfg config.Config, target config.ModelTarget) ([]Target, error) {

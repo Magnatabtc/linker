@@ -18,7 +18,9 @@
 - CodingPlan fixed-endpoint API-key flow
 - Anthropic-compatible and OpenAI-compatible HTTP surfaces with improved Anthropic SSE and tool mapping
 - Claude Code settings merge helpers with explicit diff preview and `linker-local` token
-- Interactive onboarding wizard
+- **TUI Redesign**: Replaced legacy text-based onboarding with a modern, interactive Terminal User Interface (TUI) based on the **Charmbracelet** stack (`huh` and `lipgloss`), achieving parity with OpenClaw design standards.
+- **Linker Dashboard (TUI)**: A new full-screen dashboard (`linker tui`) for real-time monitoring of daemon health, provider status, and active accounts, featuring a responsive, tabbed interface.
+- **Design System**: Created `DESIGN.md` to establish and maintain high-quality UI/UX standards for the project.
 - Install script with release lookup and checksum validation, Homebrew formula template, CI workflow, README, and logo asset
 - Unit tests for core persistence, merge, parsing, and routing contracts
 - Audit-driven closure for re-onboard account management, OAuth account fallback rotation, Antigravity native streaming, WSL startup helper generation, and status uptime/provider reporting

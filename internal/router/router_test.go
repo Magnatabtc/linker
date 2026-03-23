@@ -89,3 +89,33 @@ func TestResolveCandidatesOrdersAccountsFromActiveCursor(t *testing.T) {
 		t.Fatalf("unexpected candidate order: %#v", targets)
 	}
 }
+
+func TestResolveNormalizesLegacyCodexAliases(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default("settings.json")
+	cfg.Providers["codex"] = config.ProviderConfig{
+		Enabled:  true,
+		AuthFile: "auth/codex.json",
+	}
+
+	tests := map[string]string{
+		"gpt-5-codex":      "gpt-5.4",
+		"gpt-5-mini-codex": "gpt-5.4-mini",
+	}
+	for requested, want := range tests {
+		requested := requested
+		want := want
+		t.Run(requested, func(t *testing.T) {
+			t.Parallel()
+
+			target, err := Resolve(cfg, state.ModelRegistry{}, provider.NewRegistry(), requested)
+			if err != nil {
+				t.Fatalf("resolve route: %v", err)
+			}
+			if target.Provider != "codex" || target.Model != want || target.AuthFile != "auth/codex.json" {
+				t.Fatalf("unexpected target: %#v", target)
+			}
+		})
+	}
+}

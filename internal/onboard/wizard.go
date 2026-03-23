@@ -8,8 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 	"linker/internal/catalog"
 	"linker/internal/claude"
 	"linker/internal/config"
@@ -20,12 +24,13 @@ import (
 	"linker/internal/state"
 )
 
-const (
-	colorReset  = "\033[0m"
-	colorGreen  = "\033[32m"
-	colorYellow = "\033[33m"
-	colorRed    = "\033[31m"
-	colorCyan   = "\033[36m"
+var (
+	stylePrimary = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FFFF")).Bold(true)
+	styleSuccess = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
+	styleWarning = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFF00"))
+	styleError   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
+	styleMuted   = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
+	styleHeader  = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FFFF")).Bold(true).Padding(0, 1).MarginBottom(1).Border(lipgloss.RoundedBorder())
 )
 
 type Wizard struct {
@@ -60,24 +65,18 @@ func (w *Wizard) Run(ctx context.Context) (config.Config, error) {
 		return config.Config{}, err
 	}
 
-	fmt.Fprintln(w.out, w.paint(colorCyan, "Welcome to Linker!"))
+	fmt.Fprintln(w.out, styleHeader.Render("Welcome to Linker!"))
 	fmt.Fprintln(w.out, "  Your local AI bridge for Claude Code.")
-	mode := w.ask("Choose setup mode: [1] QuickStart [2] Advanced", "1")
-	advanced := strings.TrimSpace(mode) == "2"
 
-	selectedProviders, err := w.providerSelectionFlow(cfg)
+	choice, err := w.instantSelect(
+		"Choose setup mode",
+		"QuickStart sets sensible defaults, while Advanced lets you tune the daemon port and settings.",
+		[]string{"QuickStart", "Advanced"},
+	)
 	if err != nil {
 		return config.Config{}, err
 	}
-
-	nextProviders, err := w.configureSelectedProviders(ctx, cfg, selectedProviders)
-	if err != nil {
-		return config.Config{}, err
-	}
-	cfg.Providers = nextProviders
-
-	registry, _ := w.catalog.Refresh(ctx, cfg)
-	w.configureMappings(&cfg, registry)
+	advanced := choice == 1
 	if advanced {
 		cfg.Port = w.askInt("Daemon port", cfg.Port)
 	}
@@ -86,7 +85,7 @@ func (w *Wizard) Run(ctx context.Context) (config.Config, error) {
 	}
 
 	w.printSummary(cfg)
-	if strings.EqualFold(strings.TrimSpace(w.ask("Continue with this configuration? [Y/n]", "Y")), "n") {
+	if !w.askConfirm("Continue with this configuration?", true) {
 		return config.Config{}, fmt.Errorf("onboarding cancelled")
 	}
 
@@ -96,26 +95,43 @@ func (w *Wizard) Run(ctx context.Context) (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	fmt.Fprintf(w.out, "\n%s\n", w.paint(colorCyan, "The following changes will be applied to "+settingsPath+":"))
+
+	fmt.Fprintf(w.out, "\n%s\n", styleHeader.Render("Claude Settings Update"))
+	fmt.Fprintf(w.out, "  Path: %s\n\n", stylePrimary.Render(settingsPath))
+
 	for _, line := range diff {
-		fmt.Fprintln(w.out, line)
+		if strings.HasPrefix(line, "+") {
+			fmt.Fprintln(w.out, styleSuccess.Render("  "+line))
+		} else if strings.HasPrefix(line, "-") {
+			fmt.Fprintln(w.out, styleError.Render("  "+line))
+		} else {
+			fmt.Fprintln(w.out, "  "+line)
+		}
 	}
-	if strings.ToLower(w.ask("Apply to "+settingsPath+"? [Y/n]", "Y")) != "n" {
+	fmt.Fprintln(w.out)
+
+	if w.askConfirm("Apply changes to "+settingsPath+"?", true) {
 		if err := claude.Save(settingsPath, preview); err != nil {
 			return config.Config{}, err
 		}
-		fmt.Fprintln(w.out, w.paint(colorGreen, "Claude Code settings updated."))
+		fmt.Fprintln(w.out, styleSuccess.Render("✔ Claude Code settings updated."))
 	}
 
 	if err := w.store.Save(cfg); err != nil {
 		return config.Config{}, err
 	}
-	fmt.Fprintln(w.out, w.paint(colorGreen, "Linker configuration saved."))
+	fmt.Fprintln(w.out, styleSuccess.Render("✔ Linker configuration saved."))
+	fmt.Fprintln(w.out)
+	fmt.Fprintln(w.out, styleHeader.Render("Next Steps"))
+	fmt.Fprintln(w.out, "  1. Run `linker configure providers` to connect OAuth/API-key providers.")
+	fmt.Fprintln(w.out, "  2. Run `linker configure models` to map default/opus/sonnet/haiku.")
+	fmt.Fprintln(w.out, "  3. Start Linker with `linker start` once setup is complete.")
 
 	executable, _ := os.Executable()
 	if executable != "" {
 		if path, err := w.services.Install(executable); err == nil {
-			fmt.Fprintln(w.out, w.paint(colorGreen, w.services.InstallHint(path)))
+			fmt.Fprintln(w.out, styleSuccess.Render("✔ Service installed: "+path))
+			fmt.Fprintln(w.out, styleMuted.Render(w.services.InstallHint(path)))
 		}
 	}
 	return cfg, nil
@@ -135,23 +151,32 @@ func (w *Wizard) providerSelectionFlow(cfg config.Config) ([]string, error) {
 		return w.selectProviders(cfg)
 	}
 
-	fmt.Fprintln(w.out, "\n"+w.paint(colorYellow, "Existing configuration detected."))
+	fmt.Fprintln(w.out, styleWarning.Render("\nExisting configuration detected."))
 	for _, line := range w.providerSummaryLines(cfg) {
 		fmt.Fprintln(w.out, line)
 	}
-	choice := strings.ToUpper(strings.TrimSpace(w.ask("Options: [K]eep providers [A]dd provider [R]emove provider [C]hange providers [S]tart fresh", "K")))
+
+	choice, err := w.instantSelect(
+		"Existing Providers",
+		"What would you like to do with your existing providers?",
+		[]string{"Keep existing", "Add provider", "Remove provider", "Change providers", "Start fresh"},
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	switch choice {
-	case "K":
+	case 0: // Keep
 		selected := currentProviderIDs(cfg)
 		if len(selected) == 0 {
 			return w.selectProviders(cfg)
 		}
 		return selected, nil
-	case "A":
+	case 1: // Add
 		return w.addProviders(cfg)
-	case "R":
+	case 2: // Remove
 		return w.removeProviders(cfg)
-	case "S":
+	case 4: // Start fresh
 		return w.selectProviders(config.Default(cfg.ClaudeCode.SettingsPath))
 	default:
 		return w.selectProviders(cfg)
@@ -160,27 +185,33 @@ func (w *Wizard) providerSelectionFlow(cfg config.Config) ([]string, error) {
 
 func (w *Wizard) addProviders(cfg config.Config) ([]string, error) {
 	current := currentProviderIDs(cfg)
-	available := []provider.Info{}
+	available := []huh.Option[string]{}
 	for _, info := range w.providers.List() {
 		if _, ok := cfg.Providers[info.ID]; ok && cfg.Providers[info.ID].Enabled {
 			continue
 		}
-		available = append(available, info)
+		available = append(available, huh.NewOption(info.DisplayName, info.ID))
 	}
 	if len(available) == 0 {
 		return current, nil
 	}
-	fmt.Fprintln(w.out, "\nAdd provider(s):")
-	for i, info := range available {
-		fmt.Fprintf(w.out, "  [%d] %s\n", i+1, info.DisplayName)
+
+	var toAdd []string
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("Add Provider(s)").
+				Description("Select the additional providers you want to enable.").
+				Options(available...).
+				Value(&toAdd),
+		),
+	).Run()
+	if err != nil {
+		return current, err
 	}
-	raw := w.ask("Select provider numbers to add", "1")
-	for _, chunk := range strings.Split(raw, ",") {
-		index := parseChoice(chunk)
-		if index <= 0 || index > len(available) {
-			continue
-		}
-		current = appendIfMissing(current, available[index-1].ID)
+
+	for _, providerID := range toAdd {
+		current = appendIfMissing(current, providerID)
 	}
 	sort.Strings(current)
 	return current, nil
@@ -191,26 +222,38 @@ func (w *Wizard) removeProviders(cfg config.Config) ([]string, error) {
 	if len(current) == 0 {
 		return w.selectProviders(cfg)
 	}
-	fmt.Fprintln(w.out, "\nRemove provider(s):")
-	for i, providerID := range current {
+
+	options := []huh.Option[string]{}
+	for _, providerID := range current {
 		label := providerID
 		if info, ok := w.providers.Get(providerID); ok {
 			label = info.DisplayName
 		}
-		fmt.Fprintf(w.out, "  [%d] %s\n", i+1, label)
+		options = append(options, huh.NewOption(label, providerID))
 	}
-	raw := w.ask("Select provider numbers to remove", "")
-	remove := map[string]bool{}
-	for _, chunk := range strings.Split(raw, ",") {
-		index := parseChoice(chunk)
-		if index <= 0 || index > len(current) {
-			continue
-		}
-		remove[current[index-1]] = true
+
+	var toRemove []string
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("Remove Provider(s)").
+				Description("Select the providers you want to remove from your configuration.").
+				Options(options...).
+				Value(&toRemove),
+		),
+	).Run()
+	if err != nil {
+		return current, err
 	}
+
+	removeMap := make(map[string]bool)
+	for _, r := range toRemove {
+		removeMap[r] = true
+	}
+
 	selected := []string{}
 	for _, providerID := range current {
-		if !remove[providerID] {
+		if !removeMap[providerID] {
 			selected = append(selected, providerID)
 		}
 	}
@@ -221,23 +264,32 @@ func (w *Wizard) removeProviders(cfg config.Config) ([]string, error) {
 }
 
 func (w *Wizard) selectProviders(cfg config.Config) ([]string, error) {
-	fmt.Fprintln(w.out, "\nChoose your AI provider(s):")
 	infos := w.providers.List()
+	options := make([]huh.Option[string], len(infos))
+	currentIDs := currentProviderIDs(cfg)
 	for i, info := range infos {
-		fmt.Fprintf(w.out, "  [%d] %s\n", i+1, info.DisplayName)
-	}
-	defaultSelection := currentProviderSelection(infos, cfg)
-	raw := w.ask("Select one or more providers (e.g. 1,3)", defaultSelection)
-	chunks := strings.Split(raw, ",")
-	selected := []string{}
-	for _, chunk := range chunks {
-		var index int
-		fmt.Sscanf(strings.TrimSpace(chunk), "%d", &index)
-		if index <= 0 || index > len(infos) {
-			continue
+		options[i] = huh.NewOption(info.DisplayName, info.ID)
+		for _, cur := range currentIDs {
+			if cur == info.ID {
+				options[i] = options[i].Selected(true)
+			}
 		}
-		selected = appendIfMissing(selected, infos[index-1].ID)
 	}
+
+	var selected []string
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("AI Providers").
+				Description("Choose your AI provider(s). Use Space to select, Enter to confirm.").
+				Options(options...).
+				Value(&selected),
+		),
+	).Run()
+	if err != nil {
+		return nil, err
+	}
+
 	if len(selected) == 0 {
 		return nil, fmt.Errorf("at least one provider must be selected")
 	}
@@ -246,7 +298,8 @@ func (w *Wizard) selectProviders(cfg config.Config) ([]string, error) {
 
 func (w *Wizard) captureAccount(ctx context.Context, providerID string, existing *state.AccountAuth) (state.AccountAuth, string, provider.Info, error) {
 	info, _ := w.providers.Get(providerID)
-	fmt.Fprintf(w.out, "\n%s\n", w.paint(colorCyan, "Authenticating "+info.DisplayName))
+	fmt.Fprintf(w.out, "\n%s\n", stylePrimary.Render("Authenticating "+info.DisplayName))
+
 	auth, err := w.providers.Authenticate(ctx, providerID, providerkit.Interactive{
 		Env:    w.env,
 		Prompt: w.ask,
@@ -262,7 +315,7 @@ func (w *Wizard) captureAccount(ctx context.Context, providerID string, existing
 	if err != nil {
 		return state.AccountAuth{}, "", provider.Info{}, err
 	}
-	fmt.Fprintf(w.out, "%s\n", w.paint(colorGreen, "Authentication completed for "+info.DisplayName))
+	fmt.Fprintf(w.out, "%s\n", styleSuccess.Render("✔ Authentication completed for "+info.DisplayName))
 	return auth, w.repo.Relative(authPath), info, nil
 }
 
@@ -323,32 +376,41 @@ func (w *Wizard) configureOAuthProvider(ctx context.Context, providerID string, 
 	}
 
 	for {
-		fmt.Fprintf(w.out, "\n%s\n", w.paint(colorYellow, "Existing accounts for "+providerID))
+		fmt.Fprintf(w.out, "\n%s\n", styleWarning.Render("Existing accounts for "+providerID))
 		for idx, account := range providerCfg.Accounts {
-			status := "fallback"
+			status := styleMuted.Render("fallback")
 			if account.Active || providerCfg.ActiveAccountID == account.ID {
-				status = "active"
+				status = styleSuccess.Render("active")
 			}
-			fmt.Fprintf(w.out, "  [%d] %s (%s)\n", idx+1, account.Email, status)
+			fmt.Fprintf(w.out, "  %d. %s (%s)\n", idx+1, account.Email, status)
 		}
-		choice := strings.ToUpper(strings.TrimSpace(w.ask("Options: [K]eep [S]witch active [A]dd account [R]emove account [C]Re-authenticate active", "K")))
+
+		choice, err := w.instantSelect(
+			"Account Management",
+			"Manage your accounts for "+providerID,
+			[]string{"Keep existing", "Switch active account", "Add account", "Remove account", "Re-authenticate active"},
+		)
+		if err != nil {
+			return providerCfg, err
+		}
+
 		switch choice {
-		case "K":
+		case 0: // Keep
 			setActiveAccount(&providerCfg, providerCfg.ActiveAccountID)
 			return providerCfg, nil
-		case "S":
+		case 1: // Switch
 			index := w.chooseAccountIndex("Choose active account", providerCfg.Accounts, providerCfg.ActiveAccountID)
 			setActiveAccount(&providerCfg, providerCfg.Accounts[index].ID)
-		case "A":
+		case 2: // Add
 			auth, authPath, _, err := w.captureAccount(ctx, providerID, nil)
 			if err != nil {
 				return config.ProviderConfig{}, err
 			}
 			providerCfg = upsertAccount(providerCfg, config.AccountRef{ID: auth.ID, Email: auth.Email, Active: false, AuthFile: authPath})
-			if strings.EqualFold(w.ask("Set this account as active? [y/N]", "N"), "y") {
+			if w.askConfirm("Set this account as active?", false) {
 				setActiveAccount(&providerCfg, auth.ID)
 			}
-		case "R":
+		case 3: // Remove
 			index := w.chooseAccountIndex("Choose account to remove", providerCfg.Accounts, providerCfg.ActiveAccountID)
 			authPath := ResolveAuthPath(w.repo.Layout().Root, providerCfg.Accounts[index].AuthFile)
 			_ = w.repo.DeleteAuth(authPath)
@@ -361,7 +423,7 @@ func (w *Wizard) configureOAuthProvider(ctx context.Context, providerID string, 
 				providerCfg.Accounts = []config.AccountRef{{ID: auth.ID, Email: auth.Email, Active: true, AuthFile: authPath}}
 				providerCfg.ActiveAccountID = auth.ID
 			}
-		case "C":
+		case 4: // Re-auth
 			active := activeAccount(providerCfg)
 			existingAuth := w.loadAccountAuth(active)
 			auth, authPath, _, err := w.captureAccount(ctx, providerID, existingAuth)
@@ -405,34 +467,71 @@ func (w *Wizard) configureMappings(cfg *config.Config, registry state.ModelRegis
 	}
 	sort.Strings(providerOrder)
 
-	fmt.Fprintln(w.out, "\nConfigure model mapping for Claude Code")
+	fmt.Fprintln(w.out, styleHeader.Render("Model Mappings"))
 	cfg.ModelMapping.Default = w.chooseModelTarget("Default model", cfg.ModelMapping.Default, providerOrder, modelsByProvider)
 	cfg.ModelMapping.Opus = w.chooseModelTarget("Opus slot", cfg.ModelMapping.Opus, providerOrder, modelsByProvider)
 	cfg.ModelMapping.Sonnet = w.chooseModelTarget("Sonnet slot", cfg.ModelMapping.Sonnet, providerOrder, modelsByProvider)
 	cfg.ModelMapping.Haiku = w.chooseModelTarget("Haiku slot", cfg.ModelMapping.Haiku, providerOrder, modelsByProvider)
 }
 
-func (w *Wizard) ask(prompt string, fallback string) string {
-	if fallback != "" {
-		fmt.Fprintf(w.out, "%s [%s]: ", prompt, fallback)
-	} else {
-		fmt.Fprintf(w.out, "%s: ", prompt)
-	}
-	line, _ := w.in.ReadString('\n')
-	line = strings.TrimSpace(line)
-	if line == "" {
+func (w *Wizard) ask(title string, fallback string) string {
+	var result string
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title(title).
+				Placeholder(fallback).
+				Value(&result),
+		),
+	).Run()
+	if err != nil || result == "" {
 		return fallback
 	}
-	return line
+	return result
 }
 
-func (w *Wizard) askInt(prompt string, fallback int) int {
-	value := w.ask(prompt, fmt.Sprintf("%d", fallback))
-	var parsed int
-	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || parsed <= 0 {
+func (w *Wizard) askConfirm(title string, defaultValue bool) bool {
+	var result bool
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(title).
+				Value(&result).
+				Affirmative("Yes").
+				Negative("No"),
+		),
+	).Run()
+	if err != nil {
+		return defaultValue
+	}
+	return result
+}
+
+func (w *Wizard) askInt(title string, fallback int) int {
+	var result string
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title(title).
+				Placeholder(strconv.Itoa(fallback)).
+				Validate(func(s string) error {
+					if s == "" {
+						return nil
+					}
+					_, err := strconv.Atoi(s)
+					if err != nil {
+						return fmt.Errorf("must be a number")
+					}
+					return nil
+				}).
+				Value(&result),
+		),
+	).Run()
+	if err != nil || result == "" {
 		return fallback
 	}
-	return parsed
+	val, _ := strconv.Atoi(result)
+	return val
 }
 
 func ResolveAuthPath(root, value string) string {
@@ -446,45 +545,32 @@ func ResolveAuthPath(root, value string) string {
 }
 
 func (w *Wizard) chooseModelTarget(prompt string, current config.ModelTarget, providerOrder []string, modelsByProvider map[string][]string) config.ModelTarget {
-	defaultProviderIndex := "1"
-	for index, providerID := range providerOrder {
-		if providerID == current.Provider {
-			defaultProviderIndex = fmt.Sprintf("%d", index+1)
-			break
-		}
-	}
-	fmt.Fprintf(w.out, "\n%s\n", prompt)
-	for index, providerID := range providerOrder {
+	providerLabels := make([]string, len(providerOrder))
+	for i, providerID := range providerOrder {
 		label := providerID
 		if info, ok := w.providers.Get(providerID); ok {
 			label = info.DisplayName
 		}
-		fmt.Fprintf(w.out, "  [%d] %s\n", index+1, label)
+		providerLabels[i] = label
 	}
-	providerChoice := w.ask("Choose provider", defaultProviderIndex)
-	selectedProvider := providerOrder[0]
-	if parsed := parseChoice(providerChoice); parsed > 0 && parsed <= len(providerOrder) {
-		selectedProvider = providerOrder[parsed-1]
+
+	providerIdx, err := w.instantSelect(prompt+": Choose Provider", "", providerLabels)
+	if err != nil {
+		providerIdx = 0
 	}
+	selectedProvider := providerOrder[providerIdx]
+
 	models := modelsByProvider[selectedProvider]
 	if len(models) == 0 {
 		models = []string{current.Model}
 	}
-	defaultModelIndex := "1"
-	for index, model := range models {
-		if model == current.Model {
-			defaultModelIndex = fmt.Sprintf("%d", index+1)
-			break
-		}
+
+	modelIdx, err := w.instantSelect(prompt+": Choose Model", "", models)
+	if err != nil {
+		modelIdx = 0
 	}
-	for index, model := range models {
-		fmt.Fprintf(w.out, "  [%d] %s\n", index+1, model)
-	}
-	modelChoice := w.ask("Choose model", defaultModelIndex)
-	selectedModel := models[0]
-	if parsed := parseChoice(modelChoice); parsed > 0 && parsed <= len(models) {
-		selectedModel = models[parsed-1]
-	}
+	selectedModel := models[modelIdx]
+
 	return config.ModelTarget{Provider: selectedProvider, Model: selectedModel}
 }
 
@@ -518,15 +604,15 @@ func (w *Wizard) existingProviderAuth(providerCfg config.ProviderConfig) *state.
 }
 
 func (w *Wizard) printSummary(cfg config.Config) {
-	fmt.Fprintln(w.out, "\n"+w.paint(colorCyan, "Summary"))
-	fmt.Fprintf(w.out, "  Port: %d\n", cfg.Port)
+	fmt.Fprintln(w.out, "\n"+styleHeader.Render("Configuration Summary"))
+	fmt.Fprintf(w.out, "  Port: %s\n", stylePrimary.Render(strconv.Itoa(cfg.Port)))
 	for _, line := range w.providerSummaryLines(cfg) {
 		fmt.Fprintln(w.out, line)
 	}
-	fmt.Fprintf(w.out, "  Default: %s [%s]\n", cfg.ModelMapping.Default.Model, cfg.ModelMapping.Default.Provider)
-	fmt.Fprintf(w.out, "  Opus:    %s [%s]\n", cfg.ModelMapping.Opus.Model, cfg.ModelMapping.Opus.Provider)
-	fmt.Fprintf(w.out, "  Sonnet:  %s [%s]\n", cfg.ModelMapping.Sonnet.Model, cfg.ModelMapping.Sonnet.Provider)
-	fmt.Fprintf(w.out, "  Haiku:   %s [%s]\n", cfg.ModelMapping.Haiku.Model, cfg.ModelMapping.Haiku.Provider)
+	fmt.Fprintf(w.out, "  Default: %s [%s]\n", stylePrimary.Render(cfg.ModelMapping.Default.Model), styleMuted.Render(cfg.ModelMapping.Default.Provider))
+	fmt.Fprintf(w.out, "  Opus:    %s [%s]\n", stylePrimary.Render(cfg.ModelMapping.Opus.Model), styleMuted.Render(cfg.ModelMapping.Opus.Provider))
+	fmt.Fprintf(w.out, "  Sonnet:  %s [%s]\n", stylePrimary.Render(cfg.ModelMapping.Sonnet.Model), styleMuted.Render(cfg.ModelMapping.Sonnet.Provider))
+	fmt.Fprintf(w.out, "  Haiku:   %s [%s]\n", stylePrimary.Render(cfg.ModelMapping.Haiku.Model), styleMuted.Render(cfg.ModelMapping.Haiku.Provider))
 }
 
 func (w *Wizard) providerSummaryLines(cfg config.Config) []string {
@@ -539,19 +625,19 @@ func (w *Wizard) providerSummaryLines(cfg config.Config) []string {
 			label = info.DisplayName
 		}
 		if providerCfg.UsesProviderAuth() {
-			lines = append(lines, fmt.Sprintf("  Provider: %s", label))
+			lines = append(lines, fmt.Sprintf("  • Provider: %s", stylePrimary.Render(label)))
 			continue
 		}
 		for _, account := range providerCfg.Accounts {
-			status := w.paint(colorGreen, "active")
+			status := styleSuccess.Render("active")
 			if providerCfg.ActiveAccountID != "" && account.ID != providerCfg.ActiveAccountID && !account.Active {
-				status = w.paint(colorYellow, "fallback")
+				status = styleWarning.Render("fallback")
 			}
-			lines = append(lines, fmt.Sprintf("  Provider: %s -> %s (%s)", label, account.Email, status))
+			lines = append(lines, fmt.Sprintf("  • Provider: %s → %s (%s)", stylePrimary.Render(label), account.Email, status))
 		}
 	}
 	if len(lines) == 0 {
-		lines = append(lines, "  Provider: none")
+		lines = append(lines, "  • Provider: none")
 	}
 	return lines
 }
@@ -680,6 +766,91 @@ func (w *Wizard) loadAccountAuth(account config.AccountRef) *state.AccountAuth {
 	return &auth
 }
 
-func (w *Wizard) paint(color string, value string) string {
-	return color + value + colorReset
+type selectionModel struct {
+	title       string
+	description string
+	options     []string
+	cursor      int
+	choice      int
+	quitting    bool
+}
+
+func (m selectionModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			m.quitting = true
+			m.choice = -1
+			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.options)-1 {
+				m.cursor++
+			}
+		case "enter":
+			m.choice = m.cursor
+			return m, tea.Quit
+		default:
+			if i, err := strconv.Atoi(msg.String()); err == nil {
+				if i > 0 && i <= len(m.options) {
+					m.choice = i - 1
+					return m, tea.Quit
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m selectionModel) View() string {
+	if m.quitting {
+		return ""
+	}
+	s := "\n" + styleHeader.Render(m.title) + "\n"
+	if m.description != "" {
+		s += styleMuted.Render(m.description) + "\n\n"
+	} else {
+		s += "\n"
+	}
+
+	for i, option := range m.options {
+		cursor := "  "
+		style := lipgloss.NewStyle()
+		if m.cursor == i {
+			cursor = stylePrimary.Render("> ")
+			style = stylePrimary
+		}
+
+		s += fmt.Sprintf("%s [%d] %s\n", cursor, i+1, style.Render(option))
+	}
+
+	s += "\n" + styleMuted.Render("(use arrows or press a number to select)") + "\n"
+	return s
+}
+
+func (w *Wizard) instantSelect(title, description string, options []string) (int, error) {
+	m := selectionModel{
+		title:       title,
+		description: description,
+		options:     options,
+		choice:      -1,
+	}
+	p := tea.NewProgram(m)
+	finalModel, err := p.Run()
+	if err != nil {
+		return -1, err
+	}
+	result := finalModel.(selectionModel)
+	if result.choice == -1 {
+		return -1, fmt.Errorf("selection cancelled")
+	}
+	return result.choice, nil
 }

@@ -99,9 +99,15 @@ func (r *Repository) Layout() Layout {
 }
 
 func (r *Repository) Init() error {
-	dirs := []string{r.layout.Root, r.layout.AuthDir, r.layout.LogDir, r.layout.ServiceDir, r.layout.InstallDir}
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+	dirs := map[string]os.FileMode{
+		r.layout.Root:       0o700,
+		r.layout.AuthDir:    0o700,
+		r.layout.LogDir:     0o700,
+		r.layout.ServiceDir: 0o700,
+		r.layout.InstallDir: 0o700,
+	}
+	for dir, mode := range dirs {
+		if err := os.MkdirAll(dir, mode); err != nil {
 			return err
 		}
 	}
@@ -184,7 +190,7 @@ func (r *Repository) authPathForAuth(auth AccountAuth) string {
 
 func (r *Repository) LoadAuth(path string) (AccountAuth, error) {
 	var auth AccountAuth
-	err := readJSON(path, &auth)
+	err := readJSON(r.ResolveAuthPath(path), &auth)
 	if auth.RotationStrategy == "" && len(auth.Keys) > 0 {
 		auth.RotationStrategy = "round-robin"
 	}
@@ -192,11 +198,29 @@ func (r *Repository) LoadAuth(path string) (AccountAuth, error) {
 }
 
 func (r *Repository) DeleteAuth(path string) error {
-	err := os.Remove(path)
+	err := os.Remove(r.ResolveAuthPath(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+func (r *Repository) ResolveAuthPath(path string) string {
+	value := strings.TrimSpace(path)
+	if value == "" {
+		return ""
+	}
+	if filepath.IsAbs(value) {
+		if isWithinDir(r.layout.AuthDir, value) {
+			return value
+		}
+		return filepath.Join(r.layout.AuthDir, filepath.Base(value))
+	}
+	candidate := filepath.Join(r.layout.Root, value)
+	if isWithinDir(r.layout.AuthDir, candidate) {
+		return candidate
+	}
+	return filepath.Join(r.layout.AuthDir, filepath.Base(value))
 }
 
 func (r *Repository) Relative(path string) string {
@@ -265,7 +289,7 @@ func writeJSONAtomic(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
@@ -283,4 +307,26 @@ func sanitize(value string) string {
 func sanitizeFilename(value string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
 	return replacer.Replace(strings.TrimSpace(value))
+}
+
+func isWithinDir(dir string, candidate string) bool {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absDir, absCandidate)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

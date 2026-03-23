@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"linker/internal/api"
 	"linker/internal/catalog"
 	"linker/internal/claude"
@@ -22,6 +23,7 @@ import (
 	"linker/internal/runtime"
 	"linker/internal/service"
 	"linker/internal/state"
+	"linker/internal/tui"
 )
 
 const Version = "0.1.0"
@@ -101,32 +103,43 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		}
 		return 0, supervisor.StartBackground(ctx, mustExecutable())
 	case "status":
-		status, err := supervisor.Status()
-		if err != nil {
-			return 1, err
-		}
-		providersSummary := activeProvidersSummary(cfg)
-		if status.Running {
-			fmt.Fprintf(stdout, "running pid=%d port=%d uptime=%s providers=%s service=%s\n", status.PID, cfg.Port, formatUptime(status.StartedAt), providersSummary, serviceManager.Status())
-		} else {
-			fmt.Fprintf(stdout, "stopped port=%d providers=%s service=%s\n", cfg.Port, providersSummary, serviceManager.Status())
-		}
-		return 0, nil
+	        status, err := supervisor.Status()
+	        if err != nil {
+	                return 1, err
+	        }
+	        providersSummary := activeProvidersSummary(cfg)
+	        if status.Running {
+	                fmt.Fprintf(stdout, "running pid=%d port=%d uptime=%s providers=%s service=%s\n", status.PID, cfg.Port, formatUptime(status.StartedAt), providersSummary, serviceManager.Status())
+	        } else {
+	                fmt.Fprintf(stdout, "stopped port=%d providers=%s service=%s\n", cfg.Port, providersSummary, serviceManager.Status())
+	        }
+	        return 0, nil
+	case "tui":
+	        return runDashboard(cfg, providers, serviceManager)
 	case "logs":
-		return 0, tailLog(ctx, layout.LogFile, stdout, hasFlag(args[1:], "-f") || hasFlag(args[1:], "--follow"))
+	        return 0, tailLog(ctx, layout.LogFile, stdout, hasFlag(args[1:], "-f") || hasFlag(args[1:], "--follow"))
 	case "config":
-		return runConfigCommand(stdout, store, defaultCfg, args[1:])
+	        return runConfigCommand(stdout, store, defaultCfg, args[1:])
 	case "account":
-		return runAccountCommand(ctx, stdin, stdout, store, repo, providers, cfg, args[1:])
+	        return runAccountCommand(ctx, stdin, stdout, store, repo, providers, cfg, args[1:])
 	case "apikey":
-		return runAPIKeyCommand(ctx, stdin, stdout, store, repo, providers, cfg, args[1:])
+	        return runAPIKeyCommand(ctx, stdin, stdout, store, repo, providers, cfg, args[1:])
 	default:
-		printHelp(stderr)
-		return 1, fmt.Errorf("unknown command %q", args[0])
+	        printHelp(stderr)
+	        return 1, fmt.Errorf("unknown command %q", args[0])
 	}
-}
+	}
 
-func runServer(ctx context.Context, repo *state.Repository, store *config.Store, providers *provider.Registry, catalogService *catalog.Service, cfg config.Config) (int, error) {
+	func runDashboard(cfg config.Config, providers *provider.Registry, services *service.Manager) (int, error) {
+	p := tea.NewProgram(tui.NewDashboard(cfg, providers, services), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+	        return 1, err
+	}
+	return 0, nil
+	}
+
+	func runServer(ctx context.Context, repo *state.Repository, store *config.Store, providers *provider.Registry, catalogService *catalog.Service, cfg config.Config) (int, error) {
+
 	logger, err := logging.Open(repo.Layout().LogFile)
 	if err != nil {
 		return 1, err
@@ -284,9 +297,11 @@ func tailLog(ctx context.Context, path string, stdout io.Writer, follow bool) er
 }
 
 func printHelp(w io.Writer) {
-	fmt.Fprintln(w, "linker commands:")
-	fmt.Fprintln(w, "  linker onboard")
-	fmt.Fprintln(w, "  linker start [--fg]")
+        fmt.Fprintln(w, "linker commands:")
+        fmt.Fprintln(w, "  linker tui")
+        fmt.Fprintln(w, "  linker onboard")
+        fmt.Fprintln(w, "  linker start [--fg]")
+
 	fmt.Fprintln(w, "  linker stop")
 	fmt.Fprintln(w, "  linker restart [--fg]")
 	fmt.Fprintln(w, "  linker status")

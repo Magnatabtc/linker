@@ -3,10 +3,13 @@ package antigravity
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,7 +22,6 @@ import (
 )
 
 const (
-	callbackPort     = 51121
 	callbackPath     = "/oauth-callback"
 	authEndpoint     = "https://accounts.google.com/o/oauth2/auth"
 	tokenEndpoint    = "https://oauth2.googleapis.com/token"
@@ -28,6 +30,8 @@ const (
 	apiVersion       = "v1internal"
 	googAPIClient    = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 )
+
+var callbackPort = 51121
 
 var (
 	clientID     = strings.Join([]string{"1071006060591", "tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"}, "-")
@@ -53,7 +57,10 @@ func authenticate(ctx context.Context, ui providerkit.Interactive, existing *sta
 	redirectURL := fmt.Sprintf("http://localhost:%d%s", callbackPort, callbackPath)
 	listenerErr := make(chan error, 1)
 	codeCh := make(chan string, 1)
-	stateToken := fmt.Sprintf("linker-antigravity-%d", time.Now().UnixNano())
+	stateToken, err := randomToken(24)
+	if err != nil {
+		return state.AccountAuth{}, err
+	}
 
 	mux := http.NewServeMux()
 	server := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", callbackPort), Handler: mux}
@@ -89,14 +96,22 @@ func authenticate(ctx context.Context, ui providerkit.Interactive, existing *sta
 		default:
 		}
 	})
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			select {
-			case listenerErr <- err:
-			default:
+	manualCallbackOnly := false
+	listener, listenErr := net.Listen("tcp", server.Addr)
+	if listenErr != nil {
+		manualCallbackOnly = true
+		ui.Printf("  Local callback listener on localhost:%d is unavailable: %v\n", callbackPort, listenErr)
+		ui.Println("  Continuing in manual callback mode.")
+	} else {
+		go func() {
+			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				select {
+				case listenerErr <- err:
+				default:
+				}
 			}
-		}
-	}()
+		}()
+	}
 	defer server.Shutdown(context.Background())
 
 	authURL := buildAuthURL(redirectURL, stateToken)
@@ -111,12 +126,15 @@ func authenticate(ctx context.Context, ui providerkit.Interactive, existing *sta
 		ui.Println("  Headless environment detected. Open the URL below in a browser.")
 		ui.Printf("  If needed, forward localhost:%d from this machine before continuing.\n", callbackPort)
 	}
+	if manualCallbackOnly {
+		ui.Println("  The listener is unavailable, so you must paste the callback URL manually.")
+	}
 	ui.Printf("  %s\n", authURL)
 	ui.Println("  Waiting for Google callback...")
 
 	var manualTimer <-chan time.Time
-	if ui.Env.SSH || ui.Env.Headless {
-		timer := time.NewTimer(15 * time.Second)
+	if ui.Env.SSH || ui.Env.Headless || manualCallbackOnly {
+		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
 		manualTimer = timer.C
 	}
@@ -441,6 +459,14 @@ func parseManualCallback(raw string, expectedState string) (string, error) {
 		return "", errors.New("Antigravity callback URL did not contain a code")
 	}
 	return code, nil
+}
+
+func randomToken(size int) (string, error) {
+	data := make([]byte, size)
+	if _, err := rand.Read(data); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
 type oauthToken struct {

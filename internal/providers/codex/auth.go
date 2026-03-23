@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,10 +25,11 @@ const (
 	authURL      = "https://auth.openai.com/oauth/authorize"
 	tokenURL     = "https://auth.openai.com/oauth/token"
 	clientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
-	callbackPort = 1455
 	callbackPath = "/auth/callback"
-	baseURL      = "https://api.openai.com"
+	baseURL      = codexBackendBaseURL
 )
+
+var callbackPort = 1455
 
 func authenticate(ctx context.Context, ui providerkit.Interactive, existing *state.AccountAuth) (state.AccountAuth, error) {
 	if existing != nil && existing.AccessToken != "" && existing.RefreshToken != "" && strings.TrimSpace(existing.Email) != "" {
@@ -84,14 +86,22 @@ func authenticate(ctx context.Context, ui providerkit.Interactive, existing *sta
 		default:
 		}
 	})
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			select {
-			case listenerErr <- err:
-			default:
+	manualCallbackOnly := false
+	listener, listenErr := net.Listen("tcp", server.Addr)
+	if listenErr != nil {
+		manualCallbackOnly = true
+		ui.Printf("  Local callback listener on localhost:%d is unavailable: %v\n", callbackPort, listenErr)
+		ui.Println("  Continuing in manual callback mode.")
+	} else {
+		go func() {
+			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				select {
+				case listenerErr <- err:
+				default:
+				}
 			}
-		}
-	}()
+		}()
+	}
 	defer server.Shutdown(context.Background())
 
 	loginURL := buildAuthURL(redirectURL, stateToken, challenge)
@@ -106,11 +116,14 @@ func authenticate(ctx context.Context, ui providerkit.Interactive, existing *sta
 		ui.Println("  Headless environment detected. Open the URL below in a browser.")
 		ui.Printf("  If needed, forward localhost:%d from this machine before continuing.\n", callbackPort)
 	}
+	if manualCallbackOnly {
+		ui.Println("  The listener is unavailable, so you must paste the callback URL manually.")
+	}
 	ui.Printf("  %s\n", loginURL)
 
 	var manualTimer <-chan time.Time
-	if ui.Env.SSH || ui.Env.Headless {
-		timer := time.NewTimer(15 * time.Second)
+	if ui.Env.SSH || ui.Env.Headless || manualCallbackOnly {
+		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
 		manualTimer = timer.C
 	}
@@ -137,7 +150,7 @@ func authenticate(ctx context.Context, ui providerkit.Interactive, existing *sta
 				RefreshToken:     token.RefreshToken,
 				ExpiresAt:        time.Now().UTC().Add(time.Duration(token.ExpiresIn) * time.Second),
 				BaseURL:          baseURL,
-				UpstreamType:     "openai",
+				UpstreamType:     "codex",
 				ClientID:         clientID,
 				TokenURL:         tokenURL,
 				RefreshURL:       tokenURL,
@@ -224,7 +237,7 @@ func normalizeAuth(auth state.AccountAuth) state.AccountAuth {
 	auth.Provider = "codex"
 	auth.AuthType = "oauth"
 	auth.BaseURL = baseURL
-	auth.UpstreamType = "openai"
+	auth.UpstreamType = "codex"
 	auth.ClientID = clientID
 	auth.TokenURL = tokenURL
 	auth.RefreshURL = tokenURL
