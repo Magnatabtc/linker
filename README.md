@@ -28,7 +28,7 @@ Linker is a local AI provider bridge for Claude Code. It runs as a local daemon,
 
 ## Quickstart
 
-Use the global installer if you want the fastest path to a working `linker` command. It prefers the release binary and installs Go automatically if it has to build from source:
+Use this if you want the quickest start:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
@@ -55,11 +55,11 @@ linker start
 linker start --fg
 ```
 
-## OS-Specific Install
+## Install by OS
 
 ### macOS
 
-Terminal or `bash`:
+Copy and paste this into your terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
@@ -67,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global
 
 ### Linux
 
-`bash`:
+Copy and paste this into your terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
@@ -75,10 +75,10 @@ curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global
 
 ### Windows PowerShell
 
-Compatible with PowerShell 5.x and avoids `&&`:
+Copy and paste this into PowerShell:
 
 ```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh; if ($LASTEXITCODE -eq 0) { bash setup-global.sh }
+Set-ExecutionPolicy -Scope Process Bypass -Force; iwr https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.ps1 -UseBasicParsing -OutFile setup-global.ps1; .\setup-global.ps1
 ```
 
 ## Copy-Paste Local Setup
@@ -161,7 +161,7 @@ linker version
 
 ## Global Installer
 
-Recommended entrypoint for non-technical users. It uses the release binary when available and falls back to installing Go and building from source if needed:
+This is the quickest path:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
