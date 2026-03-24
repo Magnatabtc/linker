@@ -273,41 +273,12 @@ function Get-GoVersionFromEndpoint {
     return $versionLine
 }
 
-function Add-GoDownloadCandidate {
-    param(
-        [Parameter(Mandatory = $true)][object]$List,
-        [Parameter(Mandatory = $true)][string]$Url,
-        [string]$Sha256,
-        [string]$Source
-    )
-
-    if (-not $Url) {
-        return
-    }
-
-    $typedList = [System.Collections.ArrayList]$List
-    if (-not $typedList) {
-        return
-    }
-
-    $alreadyExists = $typedList | Where-Object { $_.Url -eq $Url } | Select-Object -First 1
-    if ($alreadyExists) {
-        return
-    }
-
-    $typedList.Add([PSCustomObject]@{
-        Url    = $Url
-        Sha256 = $Sha256
-        Source = $Source
-    }) | Out-Null
-}
-
 function Install-GoFromGoDev {
     Write-Info 'Go is missing. I am downloading it directly from go.dev...'
 
     $arch = Get-WindowsArch
     $archTag = if ($arch -eq 'arm64') { 'arm64' } else { 'amd64' }
-    $downloadCandidates = New-Object System.Collections.ArrayList
+    $downloadCandidates = @()
 
     # Smaller catalog first (faster/reliable on PowerShell 5), then fallback to full catalog.
     $catalog = Invoke-Json 'https://go.dev/dl/?mode=json'
@@ -330,8 +301,16 @@ function Install-GoFromGoDev {
 
             if ($goFile.Count -gt 0) {
                 $filename = $goFile[0].filename
-                Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://go.dev/dl/" + $filename) -Sha256 $goFile[0].sha256 -Source 'catalog'
-                Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://dl.google.com/go/" + $filename) -Sha256 $goFile[0].sha256 -Source 'catalog-mirror'
+                $downloadCandidates += [PSCustomObject]@{
+                    Url    = ("https://go.dev/dl/" + $filename)
+                    Sha256 = $goFile[0].sha256
+                    Source = 'catalog'
+                }
+                $downloadCandidates += [PSCustomObject]@{
+                    Url    = ("https://dl.google.com/go/" + $filename)
+                    Sha256 = $goFile[0].sha256
+                    Source = 'catalog-mirror'
+                }
             }
         }
     }
@@ -339,14 +318,30 @@ function Install-GoFromGoDev {
     $latestVersion = Get-GoVersionFromEndpoint
     if ($latestVersion) {
         $latestFilename = "$latestVersion.windows-$archTag.zip"
-        Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://go.dev/dl/" + $latestFilename) -Source 'version-endpoint'
-        Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://dl.google.com/go/" + $latestFilename) -Source 'version-endpoint-mirror'
+        $downloadCandidates += [PSCustomObject]@{
+            Url    = ("https://go.dev/dl/" + $latestFilename)
+            Sha256 = $null
+            Source = 'version-endpoint'
+        }
+        $downloadCandidates += [PSCustomObject]@{
+            Url    = ("https://dl.google.com/go/" + $latestFilename)
+            Sha256 = $null
+            Source = 'version-endpoint-mirror'
+        }
     }
 
     foreach ($fallbackVersion in @('go1.26.1', 'go1.26.0', 'go1.25.4', 'go1.25.3', 'go1.24.10')) {
         $fallbackFilename = "$fallbackVersion.windows-$archTag.zip"
-        Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://go.dev/dl/" + $fallbackFilename) -Source 'static-fallback'
-        Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://dl.google.com/go/" + $fallbackFilename) -Source 'static-fallback-mirror'
+        $downloadCandidates += [PSCustomObject]@{
+            Url    = ("https://go.dev/dl/" + $fallbackFilename)
+            Sha256 = $null
+            Source = 'static-fallback'
+        }
+        $downloadCandidates += [PSCustomObject]@{
+            Url    = ("https://dl.google.com/go/" + $fallbackFilename)
+            Sha256 = $null
+            Source = 'static-fallback-mirror'
+        }
     }
 
     if ($downloadCandidates.Count -eq 0) {
