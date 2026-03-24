@@ -132,6 +132,10 @@ function Get-ReleaseInfo {
     return Invoke-Json "https://api.github.com/repos/$Owner/$Repo/releases/latest"
 }
 
+function Should-Force-SourceBuild {
+    return $env:LINKER_FORCE_SOURCE -eq '1'
+}
+
 function Select-ReleaseAsset {
     param(
         [Parameter(Mandatory = $true)]$Release,
@@ -578,7 +582,13 @@ function Install-Linker {
     $tempRoot = New-TempWorkDir
 
     try {
-        $installedFromRelease = Install-FromRelease -Arch $arch -TempRoot $tempRoot
+        $installedFromRelease = $false
+        if (-not (Should-Force-SourceBuild)) {
+            $installedFromRelease = Install-FromRelease -Arch $arch -TempRoot $tempRoot
+        } else {
+            Write-Info 'Using the source code path for this check.'
+        }
+
         if (-not $installedFromRelease) {
             Write-Info 'I am switching to the source code so the setup can finish.'
             Install-FromSource -TempRoot $tempRoot
