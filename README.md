@@ -55,6 +55,32 @@ linker start
 linker start --fg
 ```
 
+## OS-Specific Install
+
+### macOS
+
+Terminal or `bash`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
+```
+
+### Linux
+
+`bash`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
+```
+
+### Windows PowerShell
+
+Compatible with PowerShell 5.x and avoids `&&`:
+
+```powershell
+curl.exe -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh; if ($LASTEXITCODE -eq 0) { bash setup-global.sh }
+```
+
 ## Copy-Paste Local Setup
 
 ```bash
