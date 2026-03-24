@@ -68,7 +68,6 @@ jobs:
           $stdout = Join-Path $env:TEMP 'linker-onboard.stdout.txt'
           $stderr = Join-Path $env:TEMP 'linker-onboard.stderr.txt'
           $env:LINKER_SKIP_ONBOARD = '1'
-          $env:LINKER_FORCE_SOURCE = '1'
           $env:PATH = "$env:WINDIR\System32;$env:WINDIR;$env:WINDIR\System32\WindowsPowerShell\v1.0"
           Set-ExecutionPolicy -Scope Process Bypass -Force
           Remove-Item -Force .\setup-global.ps1 -ErrorAction SilentlyContinue
@@ -82,14 +81,6 @@ jobs:
             throw 'linker version returned no output.'
           }
           Write-Host "linker version: $version"
-
-          $go = Get-Command go -ErrorAction Stop
-          Write-Host "go source: $($go.Source)"
-          $goVersion = & go version
-          if ([string]::IsNullOrWhiteSpace($goVersion)) {
-            throw 'go version returned no output.'
-          }
-          Write-Host "go version: $goVersion"
 
           $process = Start-Process -FilePath linker -ArgumentList 'onboard' -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           $exitedQuickly = $process.WaitForExit(15000)
