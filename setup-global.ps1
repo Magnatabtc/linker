@@ -6,12 +6,22 @@ $ProgressPreference = 'SilentlyContinue'
 $Owner = if ($env:LINKER_OWNER) { $env:LINKER_OWNER } else { 'Magnatabtc' }
 $Repo = if ($env:LINKER_REPO) { $env:LINKER_REPO } else { 'linker' }
 $Version = $env:LINKER_VERSION
+
+$ProgramRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs'
 $InstallBin = if ($env:LINKER_BIN_DIR) {
     $env:LINKER_BIN_DIR
 } else {
-    Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\linker\bin'
+    Join-Path $ProgramRoot 'linker\bin'
 }
+$InstallRoot = Split-Path -Parent $InstallBin
+$LinkerExe = Join-Path $InstallBin 'linker.exe'
+
+$GoRoot = Join-Path $ProgramRoot 'Go'
+$GoBin = Join-Path $GoRoot 'bin'
+$GoExe = Join-Path $GoBin 'go.exe'
+
 $UserAgent = 'Linker Windows Setup'
+$Headers = @{ 'User-Agent' = $UserAgent }
 
 function Write-Info {
     param([string]$Message)
@@ -29,6 +39,16 @@ function Enable-Tls12 {
     } catch {
         # Older Windows builds can ignore this.
     }
+}
+
+function Normalize-PathEntry {
+    param([string]$Path)
+
+    if (-not $Path) {
+        return ''
+    }
+
+    return $Path.Trim().TrimEnd('\').ToLowerInvariant()
 }
 
 function Get-WindowsArch {
@@ -50,11 +70,11 @@ function New-TempWorkDir {
     return $root
 }
 
-function Invoke-GitHubJson {
+function Invoke-Json {
     param([Parameter(Mandatory = $true)][string]$Uri)
 
     try {
-        return Invoke-RestMethod -Headers @{ 'User-Agent' = $UserAgent } -Uri $Uri -Method Get
+        return Invoke-RestMethod -Headers $Headers -Uri $Uri -Method Get
     } catch {
         return $null
     }
@@ -66,23 +86,50 @@ function Invoke-DownloadFile {
         [Parameter(Mandatory = $true)][string]$Path
     )
 
-    Invoke-WebRequest -Headers @{ 'User-Agent' = $UserAgent } -UseBasicParsing -Uri $Uri -OutFile $Path
+    Invoke-WebRequest -Headers $Headers -UseBasicParsing -Uri $Uri -OutFile $Path
+}
+
+function Ensure-Directory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    New-Item -ItemType Directory -Path $Path -Force | Out-Null
+}
+
+function Add-ToUserPath {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    $normalizedDirectory = Normalize-PathEntry $Directory
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $userParts = @()
+
+    if ($userPath) {
+        $userParts = $userPath -split ';' | Where-Object { $_ -and $_.Trim() }
+    }
+
+    $normalizedUserParts = @($userParts | ForEach-Object { Normalize-PathEntry $_ })
+    if ($normalizedUserParts -notcontains $normalizedDirectory) {
+        $updatedUserPath = if ($userPath) { "$userPath;$Directory" } else { $Directory }
+        [Environment]::SetEnvironmentVariable('Path', $updatedUserPath, 'User')
+    }
+
+    $sessionPath = $env:Path
+    $sessionParts = @()
+    if ($sessionPath) {
+        $sessionParts = $sessionPath -split ';' | Where-Object { $_ -and $_.Trim() }
+    }
+
+    $normalizedSessionParts = @($sessionParts | ForEach-Object { Normalize-PathEntry $_ })
+    if ($normalizedSessionParts -notcontains $normalizedDirectory) {
+        $env:Path = if ($sessionPath) { "$Directory;$sessionPath" } else { $Directory }
+    }
 }
 
 function Get-ReleaseInfo {
     if ($Version) {
-        return Invoke-GitHubJson -Uri "https://api.github.com/repos/$Owner/$Repo/releases/tags/$Version"
+        return Invoke-Json "https://api.github.com/repos/$Owner/$Repo/releases/tags/$Version"
     }
 
-    return Invoke-GitHubJson -Uri "https://api.github.com/repos/$Owner/$Repo/releases/latest"
-}
-
-function Get-SourceArchiveUrl {
-    if ($Version) {
-        return "https://github.com/$Owner/$Repo/archive/refs/tags/$Version.zip"
-    }
-
-    return "https://github.com/$Owner/$Repo/archive/refs/heads/main.zip"
+    return Invoke-Json "https://api.github.com/repos/$Owner/$Repo/releases/latest"
 }
 
 function Select-ReleaseAsset {
@@ -96,11 +143,11 @@ function Select-ReleaseAsset {
         return $null
     }
 
-    $archRegex = if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64|x64' }
+    $archPattern = if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64|x64' }
 
     $asset = $assets | Where-Object {
         $_.name -match '(?i)(windows|win)' -and
-        $_.name -match "(?i)$archRegex" -and
+        $_.name -match "(?i)$archPattern" -and
         $_.name -match '(?i)\.zip$'
     } | Select-Object -First 1
 
@@ -110,7 +157,7 @@ function Select-ReleaseAsset {
 
     return $assets | Where-Object {
         $_.browser_download_url -match '(?i)(windows|win)' -and
-        $_.browser_download_url -match "(?i)$archRegex" -and
+        $_.browser_download_url -match "(?i)$archPattern" -and
         $_.browser_download_url -match '(?i)\.zip$'
     } | Select-Object -First 1
 }
@@ -143,47 +190,20 @@ function Get-ChecksumForAsset {
     return (($match.Line -split '\s+')[0]).Trim()
 }
 
-function Add-ToUserPath {
-    param([Parameter(Mandatory = $true)][string]$Directory)
-
-    $normalizedDirectory = $Directory.Trim().TrimEnd('\')
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $userParts = @()
-
-    if ($userPath) {
-        $userParts = $userPath -split ';' | Where-Object { $_ -and $_.Trim() }
-    }
-
-    $normalizedParts = @($userParts | ForEach-Object { $_.Trim().TrimEnd('\') })
-    if ($normalizedParts -notcontains $normalizedDirectory) {
-        $updatedUserPath = if ($userPath) { "$userPath;$Directory" } else { $Directory }
-        [Environment]::SetEnvironmentVariable('Path', $updatedUserPath, 'User')
-    }
-
-    if ($env:Path) {
-        $processParts = $env:Path -split ';' | Where-Object { $_ -and $_.Trim() }
-        $normalizedProcessParts = @($processParts | ForEach-Object { $_.Trim().TrimEnd('\') })
-        if ($normalizedProcessParts -notcontains $normalizedDirectory) {
-            $env:Path = "$Directory;$env:Path"
-        }
-    } else {
-        $env:Path = $Directory
-    }
-}
-
 function Resolve-GoExe {
     $cmd = Get-Command go -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($cmd -and $cmd.Source) {
         return $cmd.Source
     }
 
-    $paths = @(
+    $candidatePaths = @(
+        (Join-Path $GoBin 'go.exe'),
         (Join-Path $env:ProgramFiles 'Go\bin\go.exe'),
         (Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Go\bin\go.exe'),
         (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Go\bin\go.exe')
     )
 
-    foreach ($path in $paths) {
+    foreach ($path in $candidatePaths) {
         if ($path -and (Test-Path $path)) {
             return $path
         }
@@ -192,31 +212,134 @@ function Resolve-GoExe {
     return $null
 }
 
-function Ensure-GoExe {
+function Refresh-GoEnvironment {
+    param([Parameter(Mandatory = $true)][string]$GoExePath)
+
+    $goBinDir = Split-Path -Parent $GoExePath
+    $goRootDir = Split-Path -Parent $goBinDir
+    $env:GOROOT = $goRootDir
+    Add-ToUserPath -Directory $goBinDir
+}
+
+function Install-GoWithWinget {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    Write-Info 'Go is missing. I am trying to install it with winget...'
+    try {
+        & winget install --exact --id GoLang.Go --silent --accept-package-agreements --accept-source-agreements | Out-Host
+    } catch {
+        return $false
+    }
+
+    return [bool](Resolve-GoExe)
+}
+
+function Install-GoWithChoco {
+    if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    Write-Info 'Go is missing. I am trying to install it with Chocolatey...'
+    try {
+        & choco install golang -y --no-progress | Out-Host
+    } catch {
+        return $false
+    }
+
+    return [bool](Resolve-GoExe)
+}
+
+function Install-GoFromGoDev {
+    Write-Info 'Go is missing. I am downloading it directly from go.dev...'
+
+    $catalog = Invoke-Json 'https://go.dev/dl/?mode=json&include=all'
+    if (-not $catalog) {
+        return $null
+    }
+
+    $stable = $catalog | Where-Object { $_.stable } | Select-Object -First 1
+    if (-not $stable) {
+        return $null
+    }
+
+    $arch = Get-WindowsArch
+    $goFile = $stable.files | Where-Object {
+        $_.os -eq 'windows' -and
+        $_.arch -eq $arch -and
+        $_.kind -eq 'archive' -and
+        $_.filename -match '\.zip$'
+    } | Select-Object -First 1
+
+    if (-not $goFile) {
+        return $null
+    }
+
+    $tempRoot = New-TempWorkDir
+    try {
+        $goZip = Join-Path $tempRoot $goFile.filename
+        $extractRoot = Join-Path $tempRoot 'go'
+
+        Invoke-DownloadFile -Uri ("https://go.dev/dl/" + $goFile.filename) -Path $goZip
+
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $goZip).Hash.ToLowerInvariant()
+        if ($goFile.sha256 -and $actualHash -ne $goFile.sha256.ToLowerInvariant()) {
+            Fail 'The Go download did not pass checksum validation.'
+        }
+
+        Ensure-Directory $extractRoot
+        Expand-Archive -LiteralPath $goZip -DestinationPath $extractRoot -Force
+
+        $goSourceRoot = Join-Path $extractRoot 'go'
+        if (-not (Test-Path $goSourceRoot)) {
+            $goSourceRoot = Get-ChildItem -Path $extractRoot -Directory | Select-Object -First 1 | ForEach-Object { $_.FullName }
+        }
+
+        if (-not $goSourceRoot -or -not (Test-Path $goSourceRoot)) {
+            return $null
+        }
+
+        Ensure-Directory $GoRoot
+        Copy-Item -Path (Join-Path $goSourceRoot '*') -Destination $GoRoot -Recurse -Force
+        Refresh-GoEnvironment -GoExePath (Join-Path $GoBin 'go.exe')
+        return Resolve-GoExe
+    } finally {
+        if (Test-Path $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Ensure-Go {
     $goExe = Resolve-GoExe
+    if ($goExe) {
+        Refresh-GoEnvironment -GoExePath $goExe
+        return $goExe
+    }
+
+    if (Install-GoWithWinget) {
+        $goExe = Resolve-GoExe
+        if ($goExe) {
+            Refresh-GoEnvironment -GoExePath $goExe
+            return $goExe
+        }
+    }
+
+    if (Install-GoWithChoco) {
+        $goExe = Resolve-GoExe
+        if ($goExe) {
+            Refresh-GoEnvironment -GoExePath $goExe
+            return $goExe
+        }
+    }
+
+    $goExe = Install-GoFromGoDev
     if ($goExe) {
         return $goExe
     }
 
-    Write-Info 'Go is not installed yet. I will try to install it now.'
-
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        & winget install --exact --id GoLang.Go --silent --accept-package-agreements --accept-source-agreements | Out-Host
-        $goExe = Resolve-GoExe
-        if ($goExe) {
-            return $goExe
-        }
-    }
-
-    if (Get-Command choco -ErrorAction SilentlyContinue) {
-        & choco install golang -y --no-progress | Out-Host
-        $goExe = Resolve-GoExe
-        if ($goExe) {
-            return $goExe
-        }
-    }
-
-    Fail 'Go could not be found or installed. Please install Go, then run this setup again.'
+    Fail 'Go is required, but I could not install it automatically. Please install Go and run this setup again.'
 }
 
 function Install-FromRelease {
@@ -227,57 +350,48 @@ function Install-FromRelease {
 
     $release = Get-ReleaseInfo
     if (-not $release) {
-        Write-Info 'I could not find a GitHub release right now. I will use a source build instead.'
+        Write-Info 'I could not find a GitHub release right now. I will use the source code instead.'
         return $false
     }
 
     $asset = Select-ReleaseAsset -Release $release -Arch $Arch
     if (-not $asset) {
-        Write-Info 'I found a release, but not a Windows download that matches this PC. I will use a source build instead.'
+        Write-Info 'I found a release, but not a Windows download that fits this PC. I will use the source code instead.'
         return $false
     }
 
-    $assetName = $asset.name
     $versionName = if ($release.tag_name) { $release.tag_name } else { 'the latest release' }
     $checksumsAsset = Select-ChecksumsAsset -Release $release
-    $archivePath = Join-Path $TempRoot $assetName
+    $archivePath = Join-Path $TempRoot $asset.name
+    $checksumsPath = Join-Path $TempRoot 'checksums.txt'
     $extractPath = Join-Path $TempRoot 'release'
-    $installRoot = Split-Path -Parent $InstallBin
-    $linkerExe = Join-Path $InstallBin 'linker.exe'
 
-    New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-    New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-    New-Item -ItemType Directory -Path $InstallBin -Force | Out-Null
+    Ensure-Directory $extractPath
+    Ensure-Directory $InstallRoot
+    Ensure-Directory $InstallBin
 
     Write-Info "Downloading $versionName..."
-
-    if ($checksumsAsset) {
-        $checksumsPath = Join-Path $TempRoot 'checksums.txt'
-        try {
+    try {
+        if ($checksumsAsset) {
             Invoke-DownloadFile -Uri $checksumsAsset.browser_download_url -Path $checksumsPath
-            Invoke-DownloadFile -Uri $asset.browser_download_url -Path $archivePath
-        } catch {
-            Write-Info 'The release download failed. I will use a source build instead.'
-            return $false
         }
 
-        $expectedHash = Get-ChecksumForAsset -ChecksumsPath $checksumsPath -AssetName $assetName
-        if (-not $expectedHash) {
-            Write-Info 'GitHub did not list a checksum for this file. I will continue without release validation.'
-        } else {
+        Invoke-DownloadFile -Uri $asset.browser_download_url -Path $archivePath
+    } catch {
+        Write-Info 'The release download failed. I will use the source code instead.'
+        return $false
+    }
+
+    if ($checksumsAsset -and (Test-Path $checksumsPath)) {
+        $expectedHash = Get-ChecksumForAsset -ChecksumsPath $checksumsPath -AssetName $asset.name
+        if ($expectedHash) {
             $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
             if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
-                Write-Info 'The release file did not pass checksum validation. I will use a source build instead.'
+                Write-Info 'The release file did not pass checksum validation. I will use the source code instead.'
                 return $false
             }
-        }
-    } else {
-        Write-Info 'GitHub did not publish a checksum file for this release. I will continue without release validation.'
-        try {
-            Invoke-DownloadFile -Uri $asset.browser_download_url -Path $archivePath
-        } catch {
-            Write-Info 'The release download failed. I will use a source build instead.'
-            return $false
+        } else {
+            Write-Info 'GitHub did not list a checksum for this file, so I will continue without release validation.'
         }
     }
 
@@ -285,51 +399,51 @@ function Install-FromRelease {
     try {
         Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath -Force
     } catch {
-        Write-Info 'I could not unpack the release file. I will use a source build instead.'
+        Write-Info 'I could not unpack the release file. I will use the source code instead.'
         return $false
     }
 
     $foundExe = Get-ChildItem -Path $extractPath -Recurse -File -Filter 'linker.exe' | Select-Object -First 1
     if (-not $foundExe) {
-        Write-Info 'The release file did not include linker.exe. I will use a source build instead.'
+        Write-Info 'The release file did not include linker.exe. I will use the source code instead.'
         return $false
     }
 
-    Copy-Item -LiteralPath $foundExe.FullName -Destination $linkerExe -Force
+    Copy-Item -LiteralPath $foundExe.FullName -Destination $LinkerExe -Force
     Add-ToUserPath -Directory $InstallBin
-
     return $true
 }
 
 function Install-FromSource {
     param(
-        [Parameter(Mandatory = $true)][string]$Arch,
         [Parameter(Mandatory = $true)][string]$TempRoot
     )
 
-    $goExe = Ensure-GoExe
-    $sourceUrl = Get-SourceArchiveUrl
+    $goExe = Ensure-Go
+    if (-not (Test-Path $goExe)) {
+        Fail 'Go could not be found after installation.'
+    }
+
     $sourceArchive = Join-Path $TempRoot 'source.zip'
     $sourceExtract = Join-Path $TempRoot 'source'
-    $installRoot = Split-Path -Parent $InstallBin
-    $linkerExe = Join-Path $InstallBin 'linker.exe'
+    $sourceUrl = 'https://codeload.github.com/Magnatabtc/linker/zip/refs/heads/main'
 
-    Write-Info 'Downloading the Linker source files...'
+    Ensure-Directory $sourceExtract
+    Ensure-Directory $InstallRoot
+    Ensure-Directory $InstallBin
+
+    Write-Info 'Downloading the Linker source code...'
     try {
         Invoke-DownloadFile -Uri $sourceUrl -Path $sourceArchive
     } catch {
-        Fail 'I could not download the Linker source files.'
+        Fail 'I could not download the Linker source code.'
     }
 
-    New-Item -ItemType Directory -Path $sourceExtract -Force | Out-Null
-    New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-    New-Item -ItemType Directory -Path $InstallBin -Force | Out-Null
-
-    Write-Info 'Unpacking source files...'
+    Write-Info 'Unpacking source code...'
     try {
         Expand-Archive -LiteralPath $sourceArchive -DestinationPath $sourceExtract -Force
     } catch {
-        Fail 'I could not unpack the Linker source files.'
+        Fail 'I could not unpack the Linker source code.'
     }
 
     $repoRoot = Get-ChildItem -Path $sourceExtract -Directory | Select-Object -First 1
@@ -340,7 +454,7 @@ function Install-FromSource {
     Write-Info 'Building Linker...'
     Push-Location $repoRoot.FullName
     try {
-        & $goExe build -o $linkerExe ./cmd/linker
+        & $goExe build -o $LinkerExe ./cmd/linker
     } catch {
         Fail 'I could not build Linker from source.'
     } finally {
@@ -350,28 +464,16 @@ function Install-FromSource {
     Add-ToUserPath -Directory $InstallBin
 }
 
-function Validate-InstalledLinker {
-    param([Parameter(Mandatory = $true)][string]$LinkerExe)
+function Invoke-Linker {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    Write-Info 'Checking the installed command...'
-    try {
-        & linker version
+    $command = Get-Command linker -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and $command.Source) {
+        & $command.Source @Arguments
         return
-    } catch {
-        & $LinkerExe version
     }
-}
 
-function Start-FirstSetup {
-    param([Parameter(Mandatory = $true)][string]$LinkerExe)
-
-    Write-Info 'Starting the first setup...'
-    try {
-        & linker onboard
-        return
-    } catch {
-        & $LinkerExe onboard
-    }
+    & $LinkerExe @Arguments
 }
 
 function Install-Linker {
@@ -382,17 +484,19 @@ function Install-Linker {
 
     $arch = Get-WindowsArch
     $tempRoot = New-TempWorkDir
-    $linkerExe = Join-Path $InstallBin 'linker.exe'
 
     try {
         $installedFromRelease = Install-FromRelease -Arch $arch -TempRoot $tempRoot
         if (-not $installedFromRelease) {
-            Write-Info 'I am switching to a source build so the setup can finish.'
-            Install-FromSource -Arch $arch -TempRoot $tempRoot
+            Write-Info 'I am switching to the source code so the setup can finish.'
+            Install-FromSource -TempRoot $tempRoot
         }
 
-        Validate-InstalledLinker -LinkerExe $linkerExe
-        Start-FirstSetup -LinkerExe $linkerExe
+        Write-Info 'Checking the installed command...'
+        Invoke-Linker -Arguments @('version')
+
+        Write-Info 'Starting the first setup...'
+        Invoke-Linker -Arguments @('onboard')
 
         Write-Info ''
         Write-Info 'Linker is ready. You can open a new PowerShell window and use linker right away.'
