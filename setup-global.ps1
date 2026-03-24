@@ -275,7 +275,7 @@ function Get-GoVersionFromEndpoint {
 
 function Add-GoDownloadCandidate {
     param(
-        [Parameter(Mandatory = $true)][System.Collections.Generic.List[object]]$List,
+        [Parameter(Mandatory = $true)][System.Collections.ArrayList]$List,
         [Parameter(Mandatory = $true)][string]$Url,
         [string]$Sha256,
         [string]$Source
@@ -302,7 +302,7 @@ function Install-GoFromGoDev {
 
     $arch = Get-WindowsArch
     $archTag = if ($arch -eq 'arm64') { 'arm64' } else { 'amd64' }
-    $downloadCandidates = New-Object 'System.Collections.Generic.List[object]'
+    $downloadCandidates = New-Object System.Collections.ArrayList
 
     # Smaller catalog first (faster/reliable on PowerShell 5), then fallback to full catalog.
     $catalog = Invoke-Json 'https://go.dev/dl/?mode=json'
