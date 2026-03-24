@@ -55,6 +55,20 @@ linker start
 linker start --fg
 ```
 
+## Copy-Paste Local Setup
+
+```bash
+git clone https://github.com/Magnatabtc/linker.git
+cd linker
+
+make build
+
+./linker onboard
+./linker start --fg
+```
+
+There is no dedicated watch/dev-loop command in this repository. After changing code, rerun `make build` to rebuild the binary.
+
 ## Configure Providers
 
 Use provider-specific commands when you want to add or manage accounts outside the wizard:
