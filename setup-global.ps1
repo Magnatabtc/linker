@@ -251,43 +251,134 @@ function Install-GoWithChoco {
     return [bool](Resolve-GoExe)
 }
 
+function Get-GoVersionFromEndpoint {
+    try {
+        $response = Invoke-WebRequest -Headers $Headers -UseBasicParsing -Uri 'https://go.dev/VERSION?m=text'
+    } catch {
+        return $null
+    }
+
+    if (-not $response -or -not $response.Content) {
+        return $null
+    }
+
+    $versionLine = $response.Content -split "\r?\n" | Where-Object {
+        $_ -match '^go\d+\.\d+(\.\d+)?$'
+    } | Select-Object -First 1
+
+    return $versionLine
+}
+
+function Add-GoDownloadCandidate {
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.Generic.List[object]]$List,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [string]$Sha256,
+        [string]$Source
+    )
+
+    if (-not $Url) {
+        return
+    }
+
+    $alreadyExists = $List | Where-Object { $_.Url -eq $Url } | Select-Object -First 1
+    if ($alreadyExists) {
+        return
+    }
+
+    $List.Add([PSCustomObject]@{
+        Url    = $Url
+        Sha256 = $Sha256
+        Source = $Source
+    }) | Out-Null
+}
+
 function Install-GoFromGoDev {
     Write-Info 'Go is missing. I am downloading it directly from go.dev...'
 
-    $catalog = Invoke-Json 'https://go.dev/dl/?mode=json&include=all'
-    if (-not $catalog) {
-        return $null
-    }
-
-    $stable = $catalog | Where-Object { $_.stable } | Select-Object -First 1
-    if (-not $stable) {
-        return $null
-    }
-
     $arch = Get-WindowsArch
-    $goFile = $stable.files | Where-Object {
-        $_.os -eq 'windows' -and
-        $_.arch -eq $arch -and
-        $_.kind -eq 'archive' -and
-        $_.filename -match '\.zip$'
-    } | Select-Object -First 1
+    $archTag = if ($arch -eq 'arm64') { 'arm64' } else { 'amd64' }
+    $downloadCandidates = New-Object 'System.Collections.Generic.List[object]'
 
-    if (-not $goFile) {
+    # Smaller catalog first (faster/reliable on PowerShell 5), then fallback to full catalog.
+    $catalog = Invoke-Json 'https://go.dev/dl/?mode=json'
+    if (-not $catalog) {
+        $catalog = Invoke-Json 'https://go.dev/dl/?mode=json&include=all'
+    }
+
+    if ($catalog) {
+        $stableEntries = @($catalog | Where-Object { $_.stable })
+        if (-not $stableEntries -or $stableEntries.Count -eq 0) {
+            $stableEntries = @($catalog)
+        }
+
+        foreach ($entry in ($stableEntries | Select-Object -First 6)) {
+            $goFile = @($entry.files | Where-Object {
+                $_.os -eq 'windows' -and
+                $_.arch -eq $archTag -and
+                $_.filename -match '\.zip$'
+            } | Select-Object -First 1)
+
+            if ($goFile.Count -gt 0) {
+                $filename = $goFile[0].filename
+                Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://go.dev/dl/" + $filename) -Sha256 $goFile[0].sha256 -Source 'catalog'
+                Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://dl.google.com/go/" + $filename) -Sha256 $goFile[0].sha256 -Source 'catalog-mirror'
+            }
+        }
+    }
+
+    $latestVersion = Get-GoVersionFromEndpoint
+    if ($latestVersion) {
+        $latestFilename = "$latestVersion.windows-$archTag.zip"
+        Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://go.dev/dl/" + $latestFilename) -Source 'version-endpoint'
+        Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://dl.google.com/go/" + $latestFilename) -Source 'version-endpoint-mirror'
+    }
+
+    foreach ($fallbackVersion in @('go1.26.1', 'go1.26.0', 'go1.25.4', 'go1.25.3', 'go1.24.10')) {
+        $fallbackFilename = "$fallbackVersion.windows-$archTag.zip"
+        Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://go.dev/dl/" + $fallbackFilename) -Source 'static-fallback'
+        Add-GoDownloadCandidate -List $downloadCandidates -Url ("https://dl.google.com/go/" + $fallbackFilename) -Source 'static-fallback-mirror'
+    }
+
+    if ($downloadCandidates.Count -eq 0) {
         return $null
     }
 
     $tempRoot = New-TempWorkDir
     try {
-        $goZip = Join-Path $tempRoot $goFile.filename
+        $goZip = Join-Path $tempRoot 'go-download.zip'
         $extractRoot = Join-Path $tempRoot 'go'
+        $downloadWorked = $false
+        $downloadSource = $null
+        $downloadSha = $null
 
-        Invoke-DownloadFile -Uri ("https://go.dev/dl/" + $goFile.filename) -Path $goZip
+        foreach ($candidate in $downloadCandidates) {
+            try {
+                if (Test-Path $goZip) {
+                    Remove-Item -LiteralPath $goZip -Force -ErrorAction SilentlyContinue
+                }
+                Invoke-DownloadFile -Uri $candidate.Url -Path $goZip
+                $downloadWorked = $true
+                $downloadSource = $candidate.Source
+                $downloadSha = $candidate.Sha256
+                break
+            } catch {
+                continue
+            }
+        }
+
+        if (-not $downloadWorked) {
+            return $null
+        }
 
         $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $goZip).Hash.ToLowerInvariant()
-        if ($goFile.sha256 -and $actualHash -ne $goFile.sha256.ToLowerInvariant()) {
+        if ($downloadSha -and $actualHash -ne $downloadSha.ToLowerInvariant()) {
             Fail 'The Go download did not pass checksum validation.'
         }
 
+        if (Test-Path $extractRoot) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
         Ensure-Directory $extractRoot
         Expand-Archive -LiteralPath $goZip -DestinationPath $extractRoot -Force
 
@@ -303,6 +394,7 @@ function Install-GoFromGoDev {
         Ensure-Directory $GoRoot
         Copy-Item -Path (Join-Path $goSourceRoot '*') -Destination $GoRoot -Recurse -Force
         Refresh-GoEnvironment -GoExePath (Join-Path $GoBin 'go.exe')
+        Write-Info "Go is ready ($downloadSource)."
         return Resolve-GoExe
     } finally {
         if (Test-Path $tempRoot) {
@@ -426,7 +518,8 @@ function Install-FromSource {
 
     $sourceArchive = Join-Path $TempRoot 'source.zip'
     $sourceExtract = Join-Path $TempRoot 'source'
-    $sourceUrl = 'https://codeload.github.com/Magnatabtc/linker/zip/refs/heads/main'
+    $sourceRef = if ($Version) { "refs/tags/$Version" } else { 'refs/heads/main' }
+    $sourceUrl = "https://codeload.github.com/$Owner/$Repo/zip/$sourceRef"
 
     Ensure-Directory $sourceExtract
     Ensure-Directory $InstallRoot
