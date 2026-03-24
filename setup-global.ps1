@@ -275,7 +275,7 @@ function Get-GoVersionFromEndpoint {
 
 function Add-GoDownloadCandidate {
     param(
-        [Parameter(Mandatory = $true)][System.Collections.ArrayList]$List,
+        [Parameter(Mandatory = $true)][object]$List,
         [Parameter(Mandatory = $true)][string]$Url,
         [string]$Sha256,
         [string]$Source
@@ -285,12 +285,17 @@ function Add-GoDownloadCandidate {
         return
     }
 
-    $alreadyExists = $List | Where-Object { $_.Url -eq $Url } | Select-Object -First 1
+    $typedList = [System.Collections.ArrayList]$List
+    if (-not $typedList) {
+        return
+    }
+
+    $alreadyExists = $typedList | Where-Object { $_.Url -eq $Url } | Select-Object -First 1
     if ($alreadyExists) {
         return
     }
 
-    $List.Add([PSCustomObject]@{
+    $typedList.Add([PSCustomObject]@{
         Url    = $Url
         Sha256 = $Sha256
         Source = $Source
