@@ -43,22 +43,26 @@ jobs:
           names = [asset.get('name', '') for asset in assets]
           windows_zips = [name for name in names if name.lower().endswith('.zip') and 'win' in name.lower()]
           checksum_files = [name for name in names if name.lower() == 'checksums.txt']
+          bootstrap_scripts = [name for name in names if name.lower() == 'setup-global.ps1']
 
           if not windows_zips:
               raise SystemExit('Latest release is missing a Windows .zip asset.')
           if not checksum_files:
               raise SystemExit('Latest release is missing checksums.txt.')
+          if not bootstrap_scripts:
+              raise SystemExit('Latest release is missing setup-global.ps1.')
 
           print('Latest release:', data.get('tag_name', '<unknown>'))
           print('Windows asset(s):', ', '.join(windows_zips))
           print('Checksum file:', checksum_files[0])
+          print('Bootstrap script:', bootstrap_scripts[0])
           PY
 
   windows-e2e:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install and verify Linker
+      - name: Install and verify Linker (remote installer command)
         shell: powershell
         run: |
           $stdout = Join-Path $env:TEMP 'linker-onboard.stdout.txt'
@@ -67,6 +71,8 @@ jobs:
           $env:LINKER_FORCE_SOURCE = '1'
           $env:PATH = "$env:WINDIR\System32;$env:WINDIR;$env:WINDIR\System32\WindowsPowerShell\v1.0"
           Set-ExecutionPolicy -Scope Process Bypass -Force
+          Remove-Item -Force .\setup-global.ps1 -ErrorAction SilentlyContinue
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/Magnatabtc/linker/releases/latest/download/setup-global.ps1' -OutFile .\setup-global.ps1
           .\setup-global.ps1
 
           $linker = Get-Command linker -ErrorAction Stop

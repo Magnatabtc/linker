@@ -78,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global
 Use this on Windows. Copy and paste this into PowerShell. No Git Bash or WSL needed:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass -Force; iwr https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.ps1 -UseBasicParsing -OutFile setup-global.ps1; .\setup-global.ps1
+Set-ExecutionPolicy -Scope Process Bypass -Force; iwr https://github.com/Magnatabtc/linker/releases/latest/download/setup-global.ps1 -UseBasicParsing -OutFile setup-global.ps1; .\setup-global.ps1
 ```
 
 ## Copy-Paste Local Setup

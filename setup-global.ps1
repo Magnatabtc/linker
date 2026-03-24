@@ -89,6 +89,32 @@ function Invoke-DownloadFile {
     Invoke-WebRequest -Headers $Headers -UseBasicParsing -Uri $Uri -OutFile $Path
 }
 
+function Invoke-DownloadFileWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$Attempts = 3
+    )
+
+    $lastError = $null
+    for ($try = 1; $try -le $Attempts; $try++) {
+        try {
+            Invoke-DownloadFile -Uri $Uri -Path $Path
+            return $true
+        } catch {
+            $lastError = $_
+            if ($try -lt $Attempts) {
+                Start-Sleep -Seconds ([Math]::Min(6, 2 * $try))
+            }
+        }
+    }
+
+    if ($lastError) {
+        throw $lastError
+    }
+    return $false
+}
+
 function Ensure-Directory {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -444,42 +470,83 @@ function Install-FromRelease {
         [Parameter(Mandatory = $true)][string]$TempRoot
     )
 
-    $release = Get-ReleaseInfo
-    if (-not $release) {
-        Write-Info 'I could not find a GitHub release right now. I will use the source code instead.'
-        return $false
-    }
-
-    $asset = Select-ReleaseAsset -Release $release -Arch $Arch
-    if (-not $asset) {
-        Write-Info 'I found a release, but not a Windows download that fits this PC. I will use the source code instead.'
-        return $false
-    }
-
-    $versionName = if ($release.tag_name) { $release.tag_name } else { 'the latest release' }
-    $checksumsAsset = Select-ChecksumsAsset -Release $release
-    $archivePath = Join-Path $TempRoot $asset.name
+    $assetName = if ($Arch -eq 'arm64') { 'linker_windows_arm64.zip' } else { 'linker_windows_amd64.zip' }
+    $checksumsName = 'checksums.txt'
+    $archivePath = Join-Path $TempRoot $assetName
     $checksumsPath = Join-Path $TempRoot 'checksums.txt'
     $extractPath = Join-Path $TempRoot 'release'
+    $assetUrlCandidates = @()
+    $checksumsUrlCandidates = @()
+
+    if ($Version) {
+        $assetUrlCandidates += "https://github.com/$Owner/$Repo/releases/download/$Version/$assetName"
+        $checksumsUrlCandidates += "https://github.com/$Owner/$Repo/releases/download/$Version/$checksumsName"
+    } else {
+        $assetUrlCandidates += "https://github.com/$Owner/$Repo/releases/latest/download/$assetName"
+        $checksumsUrlCandidates += "https://github.com/$Owner/$Repo/releases/latest/download/$checksumsName"
+    }
 
     Ensure-Directory $extractPath
     Ensure-Directory $InstallRoot
     Ensure-Directory $InstallBin
 
-    Write-Info "Downloading $versionName..."
-    try {
-        if ($checksumsAsset) {
-            Invoke-DownloadFile -Uri $checksumsAsset.browser_download_url -Path $checksumsPath
-        }
+    Write-Info 'Downloading the latest Windows package...'
+    $directAssetDownloaded = $false
+    $directChecksumsDownloaded = $false
 
-        Invoke-DownloadFile -Uri $asset.browser_download_url -Path $archivePath
-    } catch {
-        Write-Info 'The release download failed. I will use the source code instead.'
-        return $false
+    foreach ($checksumsUrl in $checksumsUrlCandidates) {
+        try {
+            Invoke-DownloadFileWithRetry -Uri $checksumsUrl -Path $checksumsPath -Attempts 2 | Out-Null
+            $directChecksumsDownloaded = $true
+            break
+        } catch {
+            continue
+        }
     }
 
-    if ($checksumsAsset -and (Test-Path $checksumsPath)) {
-        $expectedHash = Get-ChecksumForAsset -ChecksumsPath $checksumsPath -AssetName $asset.name
+    foreach ($assetUrl in $assetUrlCandidates) {
+        try {
+            Invoke-DownloadFileWithRetry -Uri $assetUrl -Path $archivePath -Attempts 3 | Out-Null
+            $directAssetDownloaded = $true
+            break
+        } catch {
+            continue
+        }
+    }
+
+    if (-not $directAssetDownloaded) {
+        # Fallback: API-based discovery for non-standard asset names.
+        $release = Get-ReleaseInfo
+        if (-not $release) {
+            Write-Info 'I could not find a GitHub release right now. I will use the source code instead.'
+            return $false
+        }
+
+        $asset = Select-ReleaseAsset -Release $release -Arch $Arch
+        if (-not $asset) {
+            Write-Info 'I found a release, but not a Windows download that fits this PC. I will use the source code instead.'
+            return $false
+        }
+
+        $archivePath = Join-Path $TempRoot $asset.name
+        $checksumsAsset = Select-ChecksumsAsset -Release $release
+
+        try {
+            if ($checksumsAsset) {
+                Invoke-DownloadFileWithRetry -Uri $checksumsAsset.browser_download_url -Path $checksumsPath -Attempts 2 | Out-Null
+                $directChecksumsDownloaded = $true
+            }
+
+            Invoke-DownloadFileWithRetry -Uri $asset.browser_download_url -Path $archivePath -Attempts 3 | Out-Null
+            $assetName = $asset.name
+        } catch {
+            Write-Info 'The release download failed. I will use the source code instead.'
+            return $false
+        }
+    }
+
+    if ($directChecksumsDownloaded -and (Test-Path $checksumsPath)) {
+        $expectedHash = Get-ChecksumForAsset -ChecksumsPath $checksumsPath -AssetName $assetName
         if ($expectedHash) {
             $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
             if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
@@ -530,7 +597,7 @@ function Install-FromSource {
 
     Write-Info 'Downloading the Linker source code...'
     try {
-        Invoke-DownloadFile -Uri $sourceUrl -Path $sourceArchive
+        Invoke-DownloadFileWithRetry -Uri $sourceUrl -Path $sourceArchive -Attempts 3 | Out-Null
     } catch {
         Fail 'I could not download the Linker source code.'
     }
