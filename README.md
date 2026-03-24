@@ -28,7 +28,7 @@ Linker is a local AI provider bridge for Claude Code. It runs as a local daemon,
 
 ## Quickstart
 
-Use the global installer if you want the fastest path to a working shell command:
+Use the global installer if you want the fastest path to a working `linker` command. It prefers the release binary and installs Go automatically if it has to build from source:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh
@@ -135,7 +135,7 @@ linker version
 
 ## Global Installer
 
-Recommended entrypoint for non-technical users:
+Recommended entrypoint for non-technical users. It uses the release binary when available and falls back to installing Go and building from source if needed:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magnatabtc/linker/main/setup-global.sh -o setup-global.sh && bash setup-global.sh

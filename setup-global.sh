@@ -8,6 +8,7 @@ BIN_DIR_OVERRIDE="${LINKER_BIN_DIR:-}"
 TAR_CMD=""
 SHA256_CMD=""
 SHA256_ARGS=()
+INSTALLED_VERSION=""
 
 log() {
   printf '%s\n' "$*"
@@ -69,6 +70,108 @@ resolve_sha256_cmd() {
     return 0
   fi
 
+  return 1
+}
+
+install_go_toolchain() {
+  if have go; then
+    return 0
+  fi
+
+  log "Go toolchain is missing; attempting automatic installation..."
+
+  if have brew; then
+    brew install go
+    hash -r || true
+    return 0
+  fi
+
+  if have apt-get; then
+    if have sudo && [[ "$(id -u)" != "0" ]]; then
+      if sudo -n true >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y golang-go
+        hash -r || true
+        return 0
+      fi
+    elif [[ "$(id -u)" == "0" ]]; then
+      apt-get update
+      apt-get install -y golang-go
+      hash -r || true
+      return 0
+    fi
+  fi
+
+  if have dnf; then
+    if have sudo && [[ "$(id -u)" != "0" ]]; then
+      if sudo -n true >/dev/null 2>&1; then
+        sudo dnf install -y golang
+        hash -r || true
+        return 0
+      fi
+    elif [[ "$(id -u)" == "0" ]]; then
+      dnf install -y golang
+      hash -r || true
+      return 0
+    fi
+  fi
+
+  if have yum; then
+    if have sudo && [[ "$(id -u)" != "0" ]]; then
+      if sudo -n true >/dev/null 2>&1; then
+        sudo yum install -y golang
+        hash -r || true
+        return 0
+      fi
+    elif [[ "$(id -u)" == "0" ]]; then
+      yum install -y golang
+      hash -r || true
+      return 0
+    fi
+  fi
+
+  if have pacman; then
+    if have sudo && [[ "$(id -u)" != "0" ]]; then
+      if sudo -n true >/dev/null 2>&1; then
+        sudo pacman -Sy --noconfirm go
+        hash -r || true
+        return 0
+      fi
+    elif [[ "$(id -u)" == "0" ]]; then
+      pacman -Sy --noconfirm go
+      hash -r || true
+      return 0
+    fi
+  fi
+
+  if have apk; then
+    if [[ "$(id -u)" == "0" ]]; then
+      apk add go
+      hash -r || true
+      return 0
+    fi
+    if have sudo && sudo -n true >/dev/null 2>&1; then
+      sudo apk add go
+      hash -r || true
+      return 0
+    fi
+  fi
+
+  if is_windows_shell; then
+    if have winget; then
+      ps_eval "winget install --exact --id GoLang.Go --accept-source-agreements --accept-package-agreements"
+      hash -r || true
+      return 0
+    fi
+
+    if have choco; then
+      ps_eval "choco install golang -y --no-progress"
+      hash -r || true
+      return 0
+    fi
+  fi
+
+  warn "Automatic Go installation was skipped because no supported package manager was available."
   return 1
 }
 
@@ -270,6 +373,197 @@ checksum_for() {
   ' "$checksums"
 }
 
+source_archive_kind() {
+  if [[ -n "$VERSION" ]]; then
+    printf '%s' "tags"
+  else
+    printf '%s' "heads"
+  fi
+}
+
+source_archive_ref() {
+  if [[ -n "$VERSION" ]]; then
+    printf '%s' "$VERSION"
+  else
+    printf '%s' "main"
+  fi
+}
+
+source_archive_ext() {
+  if is_windows_shell; then
+    printf '%s' ".zip"
+  else
+    printf '%s' ".tar.gz"
+  fi
+}
+
+source_archive_url() {
+  printf 'https://github.com/%s/%s/archive/refs/%s/%s%s' \
+    "$OWNER" \
+    "$REPO" \
+    "$(source_archive_kind)" \
+    "$(source_archive_ref)" \
+    "$(source_archive_ext)"
+}
+
+single_source_root() {
+  local dir="$1"
+  local entry
+  for entry in "$dir"/*; do
+    if [[ -d "$entry" ]]; then
+      printf '%s' "$entry"
+      return 0
+    fi
+  done
+  return 1
+}
+
+extract_source_archive() {
+  local archive_file="$1"
+  local extract_dir="$2"
+
+  if is_windows_shell; then
+    local archive_file_win extract_dir_win
+    archive_file_win="$(to_windows_path "$archive_file")"
+    extract_dir_win="$(to_windows_path "$extract_dir")"
+    ps_eval "\$ProgressPreference='SilentlyContinue'; Expand-Archive -LiteralPath $(ps_quote "$archive_file_win") -DestinationPath $(ps_quote "$extract_dir_win") -Force"
+    return 0
+  fi
+
+  [[ -n "$TAR_CMD" ]] || resolve_tar_cmd || true
+  [[ -n "$TAR_CMD" ]] || die "Need tar or gtar to extract the source archive."
+  "$TAR_CMD" -xzf "$archive_file" -C "$extract_dir"
+}
+
+validate_installed_binary() {
+  local binary_path="$1"
+  local installed_version
+
+  installed_version="$("$binary_path" version 2>/dev/null | tr -d '\r')"
+  [[ -n "$installed_version" ]] || die "Installed Linker did not return a version string."
+  INSTALLED_VERSION="$installed_version"
+  log "Verified Linker version: ${installed_version}"
+}
+
+install_from_release() {
+  local install_dir="$1"
+  local binary_name="$2"
+  local binary_path="$3"
+  local artifact_base="$4"
+  local artifact_ext="$5"
+  local api_url="$6"
+  local tmp_dir checksums_file expected_checksum archive_file checksums_url artifact_url source_binary source_binary_win target_binary_win archive_dir archive_file_win archive_dir_win
+
+  if [[ -z "$VERSION" ]]; then
+    log "Resolving latest release..."
+    VERSION="$(fetch_url "$api_url" | json_value tag_name | tr -d '\r')"
+  fi
+
+  [[ -n "$VERSION" ]] || {
+    warn "Could not resolve the latest Linker release; falling back to a source build."
+    return 1
+  }
+
+  checksums_url="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/checksums.txt"
+  artifact_url="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${artifact_base}${artifact_ext}"
+
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+  checksums_file="${tmp_dir}/checksums.txt"
+  log "Downloading ${VERSION}..."
+  if ! download_to "$checksums_url" "$checksums_file"; then
+    warn "Release checksums are unavailable; falling back to a source build."
+    return 1
+  fi
+
+  expected_checksum="$(checksum_for "${artifact_base}${artifact_ext}" "$checksums_file" | tr -d '\r')"
+  [[ -n "$expected_checksum" ]] || {
+    warn "Missing checksum for ${artifact_base}${artifact_ext}; falling back to a source build."
+    return 1
+  }
+
+  if is_windows_shell; then
+    local archive_dir
+    archive_file="${tmp_dir}/${artifact_base}${artifact_ext}"
+    archive_dir="${tmp_dir}/out"
+    mkdir -p "$archive_dir"
+
+    if ! download_to "$artifact_url" "$archive_file"; then
+      warn "Release artifact is unavailable; falling back to a source build."
+      return 1
+    fi
+
+    verify_sha256 "$archive_file" "$expected_checksum"
+
+    archive_file_win="$(to_windows_path "$archive_file")"
+    archive_dir_win="$(to_windows_path "$archive_dir")"
+    ps_eval "\$ProgressPreference='SilentlyContinue'; Expand-Archive -LiteralPath $(ps_quote "$archive_file_win") -DestinationPath $(ps_quote "$archive_dir_win") -Force"
+
+    source_binary="${archive_dir}/linker.exe"
+    [[ -f "$source_binary" ]] || source_binary="${archive_dir}/linker"
+    [[ -f "$source_binary" ]] || die "Windows archive did not contain linker.exe"
+
+    mkdir -p "$install_dir"
+    source_binary_win="$(to_windows_path "$source_binary")"
+    target_binary_win="$(to_windows_path "$binary_path")"
+    ps_eval "\$ProgressPreference='SilentlyContinue'; Copy-Item -LiteralPath $(ps_quote "$source_binary_win") -Destination $(ps_quote "$target_binary_win") -Force"
+  else
+    archive_file="${tmp_dir}/${artifact_base}${artifact_ext}"
+    if ! download_to "$artifact_url" "$archive_file"; then
+      warn "Release artifact is unavailable; falling back to a source build."
+      return 1
+    fi
+
+    verify_sha256 "$archive_file" "$expected_checksum"
+
+    mkdir -p "$install_dir"
+    [[ -n "$TAR_CMD" ]] || resolve_tar_cmd || true
+    [[ -n "$TAR_CMD" ]] || die "Need tar or gtar to extract the release archive."
+    "$TAR_CMD" -xzf "$archive_file" -C "$tmp_dir"
+
+    source_binary="${tmp_dir}/linker"
+    [[ -f "$source_binary" ]] || die "Release archive did not contain linker"
+    cp -f "$source_binary" "$binary_path"
+    chmod 0755 "$binary_path"
+  fi
+
+  return 0
+}
+
+install_from_source() {
+  local install_dir="$1"
+  local binary_path="$2"
+  local binary_name="$3"
+  local tmp_dir source_url source_dir source_root source_archive
+
+  log "Building Linker from source..."
+  install_go_toolchain || die "Go is required to build Linker from source."
+  have go || die "Go installation did not complete successfully."
+
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+  source_url="$(source_archive_url)"
+  source_dir="${tmp_dir}/source"
+  source_archive="${tmp_dir}/source-archive$(source_archive_ext)"
+  mkdir -p "$source_dir" "$install_dir"
+
+  log "Downloading source archive..."
+  download_to "$source_url" "$source_archive"
+  extract_source_archive "$source_archive" "$source_dir"
+
+  source_root="$(single_source_root "$source_dir")" || die "Source archive did not contain a repository root."
+
+  (
+    cd "$source_root"
+    GO111MODULE=on go build -o "$binary_path" ./cmd/linker
+  )
+
+  [[ -f "$binary_path" ]] || die "Source build did not produce ${binary_name}."
+  chmod 0755 "$binary_path"
+}
+
 ps_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
 }
@@ -402,7 +696,7 @@ require_platform_deps() {
   fi
 
   if ! resolve_sha256_cmd && ! is_windows_shell; then
-    die "Need sha256sum, gsha256sum, or shasum to verify the release checksum."
+    warn "Checksum verification tools are unavailable; source build fallback will be used if needed."
   fi
 }
 
@@ -415,7 +709,7 @@ main() {
 
   require_platform_deps
 
-  local install_dir binary_name binary_path artifact_base artifact_ext api_url checksums_url artifact_url tmp_dir checksums_file expected_checksum source_binary source_binary_win target_binary_win path_was_present
+  local install_dir binary_name binary_path artifact_base artifact_ext api_url path_was_present
 
   install_dir="$(choose_install_dir)" || die "No writable install directory found. Set LINKER_BIN_DIR to a writable path, such as ~/.local/bin."
 
@@ -434,65 +728,16 @@ main() {
   log "Detected ${OS}/${ARCH}"
   log "Using install directory: ${install_dir}"
 
-  if [[ -z "$VERSION" ]]; then
-    log "Resolving latest release..."
-    VERSION="$(fetch_url "$api_url" | json_value tag_name | tr -d '\r')"
-  fi
-
-  [[ -n "$VERSION" ]] || die "Could not resolve the latest Linker release."
-
-  checksums_url="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/checksums.txt"
-  artifact_url="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${artifact_base}${artifact_ext}"
-
-  tmp_dir="$(mktemp -d)"
-  cleanup() {
-    rm -rf "$tmp_dir"
-  }
-  trap cleanup EXIT
-
-  checksums_file="${tmp_dir}/checksums.txt"
-  log "Downloading ${VERSION}..."
-  download_to "$checksums_url" "$checksums_file"
-
-  expected_checksum="$(checksum_for "${artifact_base}${artifact_ext}" "$checksums_file" | tr -d '\r')"
-  [[ -n "$expected_checksum" ]] || die "Missing checksum for ${artifact_base}${artifact_ext}"
-
-  if is_windows_shell; then
-    local archive_file archive_dir archive_file_win archive_dir_win
-    archive_file="${tmp_dir}/${artifact_base}${artifact_ext}"
-    archive_dir="${tmp_dir}/out"
-    mkdir -p "$archive_dir"
-    download_to "$artifact_url" "$archive_file"
-    verify_sha256 "$archive_file" "$expected_checksum"
-
-    archive_file_win="$(to_windows_path "$archive_file")"
-    archive_dir_win="$(to_windows_path "$archive_dir")"
-    ps_eval "\$ProgressPreference='SilentlyContinue'; Expand-Archive -LiteralPath $(ps_quote "$archive_file_win") -DestinationPath $(ps_quote "$archive_dir_win") -Force"
-
-    source_binary="${archive_dir}/linker.exe"
-    [[ -f "$source_binary" ]] || source_binary="${archive_dir}/linker"
-    [[ -f "$source_binary" ]] || die "Windows archive did not contain linker.exe"
-
-    mkdir -p "$install_dir"
-    source_binary_win="$(to_windows_path "$source_binary")"
-    target_binary_win="$(to_windows_path "$binary_path")"
-    ps_eval "\$ProgressPreference='SilentlyContinue'; Copy-Item -LiteralPath $(ps_quote "$source_binary_win") -Destination $(ps_quote "$target_binary_win") -Force"
+  if is_windows_shell || resolve_sha256_cmd; then
+    if ! install_from_release "$install_dir" "$binary_name" "$binary_path" "$artifact_base" "$artifact_ext" "$api_url"; then
+      install_from_source "$install_dir" "$binary_path" "$binary_name"
+    fi
   else
-    local archive_file
-    archive_file="${tmp_dir}/${artifact_base}${artifact_ext}"
-    download_to "$artifact_url" "$archive_file"
-    verify_sha256 "$archive_file" "$expected_checksum"
-
-    mkdir -p "$install_dir"
-    [[ -n "$TAR_CMD" ]] || resolve_tar_cmd || true
-    [[ -n "$TAR_CMD" ]] || die "Need tar or gtar to extract the release archive."
-    "$TAR_CMD" -xzf "$archive_file" -C "$tmp_dir"
-
-    source_binary="${tmp_dir}/linker"
-    [[ -f "$source_binary" ]] || die "Release archive did not contain linker"
-    cp -f "$source_binary" "$binary_path"
-    chmod 0755 "$binary_path"
+    warn "Skipping release install because checksum verification tools are unavailable."
+    install_from_source "$install_dir" "$binary_path" "$binary_name"
   fi
+
+  validate_installed_binary "$binary_path"
 
   if path_contains "$install_dir"; then
     path_was_present=1
@@ -502,7 +747,7 @@ main() {
 
   export PATH="${install_dir}:${PATH}"
 
-  log "Installed Linker ${VERSION} to ${binary_path}"
+  log "Installed Linker ${INSTALLED_VERSION} to ${binary_path}"
 
   if [[ "$path_was_present" -eq 0 ]]; then
     if is_windows_shell; then
