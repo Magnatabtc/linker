@@ -1,0 +1,94 @@
+name: windows-installer-e2e
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  release-asset-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check latest release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import sys
+          import urllib.request
+          import urllib.error
+
+          url = 'https://api.github.com/repos/Magnatabtc/linker/releases/latest'
+          req = urllib.request.Request(url, headers={'User-Agent': 'Linker CI'})
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  data = json.load(resp)
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  print('No release published yet; skipping asset guard.')
+                  sys.exit(0)
+              raise
+
+          assets = data.get('assets', [])
+          names = [asset.get('name', '') for asset in assets]
+          windows_zips = [name for name in names if name.lower().endswith('.zip') and 'win' in name.lower()]
+          checksum_files = [name for name in names if name.lower() == 'checksums.txt']
+
+          if not windows_zips:
+              raise SystemExit('Latest release is missing a Windows .zip asset.')
+          if not checksum_files:
+              raise SystemExit('Latest release is missing checksums.txt.')
+
+          print('Latest release:', data.get('tag_name', '<unknown>'))
+          print('Windows asset(s):', ', '.join(windows_zips))
+          print('Checksum file:', checksum_files[0])
+          PY
+
+  windows-e2e:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install and verify Linker
+        shell: powershell
+        run: |
+          $stdout = Join-Path $env:TEMP 'linker-onboard.stdout.txt'
+          $stderr = Join-Path $env:TEMP 'linker-onboard.stderr.txt'
+          $env:LINKER_SKIP_ONBOARD = '1'
+          $env:PATH = "$env:WINDIR\System32;$env:WINDIR;$env:WINDIR\System32\WindowsPowerShell\v1.0"
+          Set-ExecutionPolicy -Scope Process Bypass -Force
+          .\setup-global.ps1
+
+          $linker = Get-Command linker -ErrorAction Stop
+          Write-Host "linker source: $($linker.Source)"
+          $version = & linker version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw 'linker version returned no output.'
+          }
+          Write-Host "linker version: $version"
+
+          $go = Get-Command go -ErrorAction Stop
+          Write-Host "go source: $($go.Source)"
+          $goVersion = & go version
+          if ([string]::IsNullOrWhiteSpace($goVersion)) {
+            throw 'go version returned no output.'
+          }
+          Write-Host "go version: $goVersion"
+
+          $process = Start-Process -FilePath linker -ArgumentList 'onboard' -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $exitedQuickly = $process.WaitForExit(15000)
+          if ($exitedQuickly) {
+            if ($process.ExitCode -ne 0) {
+              Write-Host 'stdout:'
+              if (Test-Path $stdout) { Get-Content $stdout | Write-Host }
+              Write-Host 'stderr:'
+              if (Test-Path $stderr) { Get-Content $stderr | Write-Host }
+              throw "linker onboard exited immediately with code $($process.ExitCode)."
+            }
+            Write-Host 'linker onboard exited cleanly during the smoke check.'
+          } else {
+            Stop-Process -Id $process.Id -Force
+            Write-Host 'linker onboard stayed alive during the smoke check.'
+          }

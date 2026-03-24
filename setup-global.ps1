@@ -518,8 +518,7 @@ function Install-FromSource {
 
     $sourceArchive = Join-Path $TempRoot 'source.zip'
     $sourceExtract = Join-Path $TempRoot 'source'
-    $sourceRef = if ($Version) { "refs/tags/$Version" } else { 'refs/heads/main' }
-    $sourceUrl = "https://codeload.github.com/$Owner/$Repo/zip/$sourceRef"
+    $sourceUrl = "https://codeload.github.com/$Owner/$Repo/zip/refs/heads/main"
 
     Ensure-Directory $sourceExtract
     Ensure-Directory $InstallRoot
@@ -588,8 +587,12 @@ function Install-Linker {
         Write-Info 'Checking the installed command...'
         Invoke-Linker -Arguments @('version')
 
-        Write-Info 'Starting the first setup...'
-        Invoke-Linker -Arguments @('onboard')
+        if ($env:LINKER_SKIP_ONBOARD -eq '1') {
+            Write-Info 'Skipping the first setup because this is an automated check.'
+        } else {
+            Write-Info 'Starting the first setup...'
+            Invoke-Linker -Arguments @('onboard')
+        }
 
         Write-Info ''
         Write-Info 'Linker is ready. You can open a new PowerShell window and use linker right away.'
