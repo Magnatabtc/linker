@@ -70,7 +70,7 @@ func (w *Wizard) Run(ctx context.Context) (config.Config, error) {
 
 	choice, err := w.instantSelect(
 		"Choose setup mode",
-		"QuickStart sets sensible defaults, while Advanced lets you tune the daemon port and settings.",
+		"QuickStart keeps daemon defaults, while Advanced lets you tune the daemon port before provider and model setup.",
 		[]string{"QuickStart", "Advanced"},
 	)
 	if err != nil {
@@ -83,6 +83,22 @@ func (w *Wizard) Run(ctx context.Context) (config.Config, error) {
 	if cfg.ClaudeCode.SettingsPath == "" {
 		cfg.ClaudeCode = w.defaultCfg.ClaudeCode
 	}
+
+	selectedProviders, err := w.providerSelectionFlow(cfg)
+	if err != nil {
+		return config.Config{}, err
+	}
+	cfg.Providers, err = w.configureSelectedProviders(ctx, cfg, selectedProviders)
+	if err != nil {
+		return config.Config{}, err
+	}
+
+	registry, err := w.catalog.Refresh(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(w.out, "%s\n", styleWarning.Render("! Catalog refresh failed, using built-in models only: "+err.Error()))
+		registry = state.ModelRegistry{Entries: map[string][]state.DiscoveredModel{}}
+	}
+	w.configureMappings(&cfg, registry)
 
 	w.printSummary(cfg)
 	if !w.askConfirm("Continue with this configuration?", true) {
@@ -123,9 +139,9 @@ func (w *Wizard) Run(ctx context.Context) (config.Config, error) {
 	fmt.Fprintln(w.out, styleSuccess.Render("✔ Linker configuration saved."))
 	fmt.Fprintln(w.out)
 	fmt.Fprintln(w.out, styleHeader.Render("Next Steps"))
-	fmt.Fprintln(w.out, "  1. Run `linker configure providers` to connect OAuth/API-key providers.")
-	fmt.Fprintln(w.out, "  2. Run `linker configure models` to map default/opus/sonnet/haiku.")
-	fmt.Fprintln(w.out, "  3. Start Linker with `linker start` once setup is complete.")
+	fmt.Fprintln(w.out, "  1. Start Linker with `linker start` once setup is complete.")
+	fmt.Fprintln(w.out, "  2. Run `linker status` to verify the daemon and provider summary.")
+	fmt.Fprintln(w.out, "  3. Re-run `linker onboard` any time you need to change providers or Claude slots.")
 
 	executable, _ := os.Executable()
 	if executable != "" {
@@ -147,7 +163,7 @@ func (w *Wizard) CaptureProviderForCLI(ctx context.Context, providerID string, e
 }
 
 func (w *Wizard) providerSelectionFlow(cfg config.Config) ([]string, error) {
-	if len(cfg.Providers) == 0 {
+	if len(currentProviderIDs(cfg)) == 0 {
 		return w.selectProviders(cfg)
 	}
 
@@ -293,6 +309,7 @@ func (w *Wizard) selectProviders(cfg config.Config) ([]string, error) {
 	if len(selected) == 0 {
 		return nil, fmt.Errorf("at least one provider must be selected")
 	}
+	sort.Strings(selected)
 	return selected, nil
 }
 
@@ -440,8 +457,24 @@ func (w *Wizard) configureOAuthProvider(ctx context.Context, providerID string, 
 }
 
 func (w *Wizard) configureMappings(cfg *config.Config, registry state.ModelRegistry) {
+	providerOrder, modelsByProvider := w.mappingChoices(*cfg, registry)
+
+	fmt.Fprintln(w.out, styleHeader.Render("Model Mappings"))
+	cfg.ModelMapping.Default = w.chooseModelTarget("Default model", cfg.ModelMapping.Default, providerOrder, modelsByProvider)
+	cfg.ModelMapping.Opus = w.chooseModelTarget("Opus slot", cfg.ModelMapping.Opus, providerOrder, modelsByProvider)
+	cfg.ModelMapping.Sonnet = w.chooseModelTarget("Sonnet slot", cfg.ModelMapping.Sonnet, providerOrder, modelsByProvider)
+	cfg.ModelMapping.Haiku = w.chooseModelTarget("Haiku slot", cfg.ModelMapping.Haiku, providerOrder, modelsByProvider)
+}
+
+func (w *Wizard) mappingChoices(cfg config.Config, registry state.ModelRegistry) ([]string, map[string][]string) {
 	modelsByProvider := map[string][]string{}
+	providerOrder := []string{}
+
 	for providerID, providerCfg := range cfg.Providers {
+		if !providerCfg.Enabled {
+			continue
+		}
+		providerOrder = append(providerOrder, providerID)
 		for _, builtin := range w.providers.BuiltinModels(providerID) {
 			modelsByProvider[providerID] = appendIfMissing(modelsByProvider[providerID], builtin.Name)
 		}
@@ -458,20 +491,12 @@ func (w *Wizard) configureMappings(cfg *config.Config, registry state.ModelRegis
 			}
 		}
 	}
+
 	for providerID := range modelsByProvider {
 		sort.Strings(modelsByProvider[providerID])
 	}
-	providerOrder := []string{}
-	for providerID := range cfg.Providers {
-		providerOrder = append(providerOrder, providerID)
-	}
 	sort.Strings(providerOrder)
-
-	fmt.Fprintln(w.out, styleHeader.Render("Model Mappings"))
-	cfg.ModelMapping.Default = w.chooseModelTarget("Default model", cfg.ModelMapping.Default, providerOrder, modelsByProvider)
-	cfg.ModelMapping.Opus = w.chooseModelTarget("Opus slot", cfg.ModelMapping.Opus, providerOrder, modelsByProvider)
-	cfg.ModelMapping.Sonnet = w.chooseModelTarget("Sonnet slot", cfg.ModelMapping.Sonnet, providerOrder, modelsByProvider)
-	cfg.ModelMapping.Haiku = w.chooseModelTarget("Haiku slot", cfg.ModelMapping.Haiku, providerOrder, modelsByProvider)
+	return providerOrder, modelsByProvider
 }
 
 func (w *Wizard) ask(title string, fallback string) string {
@@ -554,9 +579,10 @@ func (w *Wizard) chooseModelTarget(prompt string, current config.ModelTarget, pr
 		providerLabels[i] = label
 	}
 
-	providerIdx, err := w.instantSelect(prompt+": Choose Provider", "", providerLabels)
+	providerIdx := optionIndex(providerOrder, current.Provider)
+	providerIdx, err := w.instantSelectWithDefault(prompt+": Choose Provider", "", providerLabels, providerIdx)
 	if err != nil {
-		providerIdx = 0
+		providerIdx = optionIndex(providerOrder, current.Provider)
 	}
 	selectedProvider := providerOrder[providerIdx]
 
@@ -565,13 +591,23 @@ func (w *Wizard) chooseModelTarget(prompt string, current config.ModelTarget, pr
 		models = []string{current.Model}
 	}
 
-	modelIdx, err := w.instantSelect(prompt+": Choose Model", "", models)
+	modelIdx := optionIndex(models, current.Model)
+	modelIdx, err = w.instantSelectWithDefault(prompt+": Choose Model", "", models, modelIdx)
 	if err != nil {
-		modelIdx = 0
+		modelIdx = optionIndex(models, current.Model)
 	}
 	selectedModel := models[modelIdx]
 
 	return config.ModelTarget{Provider: selectedProvider, Model: selectedModel}
+}
+
+func optionIndex(options []string, current string) int {
+	for idx, option := range options {
+		if option == current {
+			return idx
+		}
+	}
+	return 0
 }
 
 func (w *Wizard) existingAuth(cfg config.Config, providerID string) *state.AccountAuth {
@@ -837,10 +873,18 @@ func (m selectionModel) View() string {
 }
 
 func (w *Wizard) instantSelect(title, description string, options []string) (int, error) {
+	return w.instantSelectWithDefault(title, description, options, 0)
+}
+
+func (w *Wizard) instantSelectWithDefault(title, description string, options []string, defaultCursor int) (int, error) {
+	if defaultCursor < 0 || defaultCursor >= len(options) {
+		defaultCursor = 0
+	}
 	m := selectionModel{
 		title:       title,
 		description: description,
 		options:     options,
+		cursor:      defaultCursor,
 		choice:      -1,
 	}
 	p := tea.NewProgram(m)

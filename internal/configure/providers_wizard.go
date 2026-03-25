@@ -81,7 +81,7 @@ func (w *ProvidersWizard) Run(ctx context.Context) (config.Config, error) {
 	for _, line := range w.providerSummaryLines(cfg) {
 		fmt.Fprintln(w.out, line)
 	}
-	fmt.Fprintln(w.out, "  Next: run `linker configure models` to map Claude slots.")
+	fmt.Fprintln(w.out, "  Next: re-run `linker onboard` if you need to update Claude slot mappings.")
 	return cfg, nil
 }
 
